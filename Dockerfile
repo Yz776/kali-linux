@@ -52,9 +52,12 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     KFAI_MCP_BRANCH=master \
     TTT_REPO=https://github.com/Yz776/ttt.git \
     TTT_BRANCH= \
+    NEXCLOUD_REPO=https://github.com/Yz776/nexcloud.git \
+    NEXCLOUD_BRANCH= \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
+    NEXCLOUD_DIR=/data/apps/nexcloud \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -239,6 +242,7 @@ const path = require('path');
 const KFAI_DIR     = process.env.KFAI_DIR     || '/data/apps/kfai-nodejs';
 const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
+const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -254,9 +258,10 @@ const FOCUS_NICE         = Number(process.env.FOCUS_NICE             || 1);
 const STARVE_SAFE_NICE   = Number(process.env.STARVE_SAFE_NICE       || 6);
 
 // Alokasi memori dinamis berdasarkan total RAM tersedia
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.floor(TOTAL_MEM_MB * 0.35));
-const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.floor(TOTAL_MEM_MB * 0.40));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.floor(TOTAL_MEM_MB * 0.20));
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.floor(TOTAL_MEM_MB * 0.30));
+const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.floor(TOTAL_MEM_MB * 0.35));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.floor(TOTAL_MEM_MB * 0.15));
+const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.floor(TOTAL_MEM_MB * 0.15));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 128);
 
 // ── Definisi app ─────────────────────────────────────────────────────────────
@@ -279,6 +284,12 @@ const APPS = [
     name:     'ttt',
     script:   '/usr/local/bin/run-ttt.sh',
     memoryMB: TTT_MEM,
+    nice:     NORMAL_NICE,
+  },
+  {
+    name:     'nexcloud',
+    script:   '/usr/local/bin/run-nexcloud.sh',
+    memoryMB: NEXCLOUD_MEM,
     nice:     NORMAL_NICE,
   },
   {
@@ -704,6 +715,7 @@ mkdir -p /data/apps /data/bin /data/root/.pm2 /data/root/.npm
 clone_or_pull "kfai-nodejs" "${KFAI_REPO:-}"     "${KFAI_DIR:-/data/apps/kfai-nodejs}"  "${KFAI_BRANCH:-}" &
 clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfai-mcp}" "${KFAI_MCP_BRANCH:-}" &
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
+clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -850,6 +862,20 @@ exec /usr/local/bin/run-node-app.sh \
   "${TTT_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
+# ─── run-nexcloud.sh ──────────────────────────────────────────────────────────
+RUN cat > /usr/local/bin/run-nexcloud.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/bin/run-node-app.sh \
+  "nexcloud" \
+  "${NEXCLOUD_DIR:-/data/apps/nexcloud}" \
+  "${NEXCLOUD_ENTRY:-server.js}" \
+  "${NEXCLOUD_NODE_MODULES_ZIP:-node_modules.zip}" \
+  "${NEXCLOUD_USE_NODE_MODULES_ZIP:-true}" \
+  "${NEXCLOUD_SKIP_NPM_INSTALL:-false}" \
+  "${NEXCLOUD_NODE_OPTIONS:---max-old-space-size=256}"
+SCRIPT
+
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -894,7 +920,7 @@ else
 fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,comm --sort=-%mem | head -n 18
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" pm2 "node.*server" "node.*kfai" "node.*ttt" sshd cloudflared; do
+for pat in "adaptive-launcher" pm2 "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1012,9 +1038,10 @@ const memTotal = (() => {
   } catch { return 2048; }
 })();
 const mem = {
-  kfai: process.env.KFAI_MAX_MEMORY     || Math.floor(memTotal*0.35)+'M',
-  mcp:  process.env.KFAI_MCP_MAX_MEMORY || Math.floor(memTotal*0.40)+'M',
-  ttt:  process.env.TTT_MAX_MEMORY       || Math.floor(memTotal*0.20)+'M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.floor(memTotal*0.30)+'M',
+  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.floor(memTotal*0.35)+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.floor(memTotal*0.15)+'M',
+  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.floor(memTotal*0.15)+'M',
   cf:   '96M',
 };
 const nodeArgs = '--expose-gc --max-http-header-size=16384';
@@ -1033,6 +1060,10 @@ module.exports = { apps: [
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
     max_memory_restart:mem.ttt, kill_timeout:10000, listen_timeout:15000,
+    node_args:nodeArgs, env:{NODE_ENV:'production'} },
+  { name:'nexcloud', script:'/usr/local/bin/run-nexcloud.sh', interpreter:'bash',
+    autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
+    max_memory_restart:mem.nexcloud, kill_timeout:10000, listen_timeout:15000,
     node_args:nodeArgs, env:{NODE_ENV:'production'} },
 ]};
 PM2EOF
@@ -1059,6 +1090,7 @@ RUN chmod +x \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
+      /usr/local/bin/run-nexcloud.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
