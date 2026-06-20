@@ -233,23 +233,22 @@ enable-cache           services  no
 EOF
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ADAPTIVE LAUNCHER v2 – index.js
-# Perubahan utama:
-#   1. Deteksi RAM via cgroup (v1 + v2), fallback os.totalmem — fix bug os.totalmem=baca host
+# ADAPTIVE LAUNCHER v3 – index.js
+# Perubahan utama dari v2:
+#   1. Deteksi RAM via cgroup (v1 + v2), fallback os.totalmem
 #   2. Cap total app memory ke APP_MEM_BUDGET_PERCENT (default 75%) RAM container
-#   3. Mem guard 3-level: SOFT (warn + GC nudge) → HARD (SIGTERM) → KILL (SIGKILL)
-#      Rolling window: strike reset setelah MEM_GUARD_WINDOW_MS sehat
-#   4. Crash-loop protection: max CRASH_LOOP_MAX restart dlm CRASH_LOOP_WINDOW_MS,
-#      jika dilewati → backoff CRASH_LOOP_BACKOFF_MS
-#   5. Memory pressure detector: jika MemAvailable < threshold, restart app paling boros
-#   6. Rebalance loop di-throttle: skip jika tidak ada perubahan CPU signifikan
-#   7. NODE_OPTIONS per-app: --max-semi-space-size=64 (gc-interval hanya via CLI)
+#   3. Mem MONITOR — TIDAK pernah kill. Hanya pantau RSS + GC nudge.
+#   4. Crash-loop protection: max CRASH_LOOP_MAX restart, backoff otomatis
+#   5. Memory pressure: graduated response (nudge → pause → kill hanya darurat)
+#   6. Dynamic memory rebalancer: limit otomatis naik/turun sesuai kebutuhan nyata
+#   7. CPU rebalance: nice adaptif berdasarkan interaksi user
+#   8. NODE_OPTIONS per-app: --max-semi-space-size=64 (gc-interval hanya via CLI)
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
-// /data/launcher/index.js  (v2 — stabil + hemat RAM)
+// /data/launcher/index.js  (v3 — dinamis, minimal restart)
 // Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, cloudflared
-// sebagai proses child dengan adaptive CPU priority, memory guard 3-level,
-// crash-loop protection, dan memory pressure detector.
+// dengan dynamic memory allocation, CPU priority adaptif, graduated pressure response.
+// TIDAK pernah restart app karena alasan memory — limitnya yang berubah.
 //
 // ENV override (semua opsional):
 //   LAUNCHER_MODE=adaptive|pm2
@@ -414,6 +413,11 @@ const restartHist = new Map(); // name → number[] (timestamps)
 const backoffUntil= new Map(); // name → timestamp (jangan restart sebelum ini)
 const lastRebalanceSig = new Map(); // name → signature CPU terakhir (untuk throttle)
 
+// ── Dynamic memory state ───────────────────────────────────────────────────
+const dynamicLimit = new Map();  // name → current dynamic mem limit (MB)
+const rssPeak      = new Map();  // name → peak RSS observed (MB)
+const rssSamples   = new Map();  // name → number[] (rolling RSS, max 30)
+
 let focusedApp  = MANUAL_FOCUS || null;
 let focusUntil  = MANUAL_FOCUS ? Number.MAX_SAFE_INTEGER : 0;
 
@@ -517,55 +521,45 @@ function rebalanceNice() {
   }
 }
 
-// ── Mem guard v2 — 3-level dengan rolling window ──────────────────────────────
-function startMemGuard(app, child) {
+// ── Mem monitor — pantau RSS, kirim GC nudge, TIDAK PERNAH kill ────────────────
+// Restart HANYA dilakukan oleh crash recovery (child.on close).
+// Limit mem tidak fix — di-adjust oleh rebalanceMemory() secara dinamis.
+function startMemMonitor(app, child) {
   if (!isLinux) return;
   const nominal    = safeNum(app.memoryMB, 512);
-  const softLimit  = Math.ceil(nominal * MEM_GUARD_SOFT_RATIO);
-  const hardLimit  = Math.ceil(nominal * MEM_GUARD_HARD_RATIO);
-  memGuardSt.set(app.name, { strikes: 0, lastWarnAt: 0, lastRss: 0 });
+  const softRatio  = Number(process.env.MEM_GUARD_SOFT_RATIO || 1.20);
+  const softLimit  = Math.ceil(nominal * softRatio);
+  const intervalMs = Number(process.env.MEM_GUARD_INTERVAL_MS || 8000);
+  memGuardSt.set(app.name, { lastWarnAt: 0, lastRss: 0 });
 
   const t = setInterval(() => {
     if (!child.pid || child.killed) { clearInterval(t); return; }
-    const state = memGuardSt.get(app.name) || { strikes: 0, lastWarnAt: 0, lastRss: 0 };
     const rss = readRssMB(child.pid);
     if (rss == null) return;
+    const state = memGuardSt.get(app.name) || { lastWarnAt: 0, lastRss: 0 };
     state.lastRss = rss;
+
+    // Track peak & rolling samples untuk dynamic allocator
+    const peak = rssPeak.get(app.name) || 0;
+    if (rss > peak) rssPeak.set(app.name, rss);
+    const samples = (rssSamples.get(app.name) || []);
+    samples.push(rss);
+    if (samples.length > 30) samples.shift();
+    rssSamples.set(app.name, samples);
+
+    // Update dynamic limit: pakai current limit kalau sudah di-adjust, else nominal
+    if (!dynamicLimit.has(app.name)) dynamicLimit.set(app.name, nominal);
+    const dynLimit = dynamicLimit.get(app.name);
+
+    // GC nudge kalau RSS melewati dynamic limit * softRatio
     const now = Date.now();
-
-    // Reset strikes kalau sehat selama MEM_GUARD_WINDOW_MS
-    if (state.strikes > 0 && (now - state.lastWarnAt) > MEM_GUARD_WINDOW_MS) {
-      state.strikes = 0;
-    }
-
-    if (rss > hardLimit) {
-      state.strikes += 2;
+    if (rss > dynLimit * softRatio && (now - state.lastWarnAt) > 30000) {
       state.lastWarnAt = now;
-      warn(app.name, `RSS ${rss}MB > HARD ${hardLimit}MB (strikes ${state.strikes}/${MEM_GUARD_MAX_STRIKES})`);
-      if (state.strikes >= MEM_GUARD_MAX_STRIKES) {
-        warn(app.name, `hard kill: RSS ${rss}MB sustained > ${hardLimit}MB`);
-        restarting.set(app.name, true);
-        try {
-          child.kill('SIGTERM');
-          const killT = setTimeout(() => {
-            try { if (!child.killed) child.kill('SIGKILL'); } catch {}
-          }, 4000);
-          killT.unref();
-        } catch (e) { err(app.name, 'kill gagal:', e); }
-      } else {
-        // SIGUSR2 = GC nudge (jika app mendukung), bukan restart
-        try { child.kill('SIGUSR2'); } catch {}
-      }
-    } else if (rss > softLimit) {
-      state.strikes += 1;
-      state.lastWarnAt = now;
-      warn(app.name, `RSS ${rss}MB > SOFT ${softLimit}MB (strikes ${state.strikes}/${MEM_GUARD_MAX_STRIKES}) — GC nudge`);
+      warn(app.name, `RSS ${rss}MB > limit ${dynLimit}MB — GC nudge (limit akan di-adjust)`);
       try { child.kill('SIGUSR2'); } catch {}
-    } else {
-      if (state.strikes > 0) state.strikes = Math.max(0, state.strikes - 1);
     }
     memGuardSt.set(app.name, state);
-  }, MEM_GUARD_INTERVAL_MS);
+  }, intervalMs);
   t.unref();
 }
 
@@ -601,36 +595,127 @@ function shouldRestart(name, uptimeMs) {
   return true;
 }
 
-// ── Memory pressure detector (proaktif) ──────────────────────────────────────
+// ── Memory pressure — graduated response, TIDAK langsung kill ──────────────────
+// Level 1: MemAvail < 128MB → GC nudge semua non-kritis yang boros
+// Level 2: MemAvail < 64MB  → pause app prioritas terendah 5 detik (SIGSTOP/SIGCONT)
+// Level 3: MemAvail < 32MB  → kill app prioritas terendah (DARURAT ABSOLUT saja)
+let pressureLevel = 0;
 function checkMemoryPressure() {
   if (!isLinux) return;
   const avail = readMemAvailMB();
   if (avail == null) return;
-  if (avail >= PRESSURE_AVAIL_THRESHOLD_MB) return;
+  const threshold = Number(process.env.PRESSURE_AVAIL_THRESHOLD_MB || 128);
+  if (avail >= threshold) { pressureLevel = 0; return; }
 
-  // Cari app non-kritis dengan RSS terbesar untuk di-restart
-  let victim = null;
-  let maxRss = 0;
+  // Level 1: GC nudge semua app yang boros (>64MB)
+  if (avail < 128) {
+    if (pressureLevel < 1) {
+      warn('PRESSURE', `MemAvail ${avail}MB < 128MB → GC nudge semua app`);
+      pressureLevel = 1;
+    }
+    for (const app of APPS) {
+      if (app.name === 'cloudflared-ssh') continue;
+      const child = children.get(app.name);
+      if (!child?.pid) continue;
+      const rss = readRssMB(child.pid) || 0;
+      if (rss > 64) try { child.kill('SIGUSR2'); } catch {}
+    }
+  }
+
+  // Level 2: pause app prioritas terendah 5 detik (bukan kill!)
+  if (avail < 64) {
+    if (pressureLevel < 2) {
+      warn('PRESSURE', `MemAvail ${avail}MB < 64MB → pause app prioritas terendah 5s`);
+      pressureLevel = 2;
+    }
+    let lowest = null; let lowestPri = Infinity;
+    for (const app of APPS) {
+      if (app.name === 'cloudflared-ssh' || app.name === INTERACTIVE_APP) continue;
+      if (!children.has(app.name)) continue;
+      if (app.priority < lowestPri) { lowestPri = app.priority; lowest = app; }
+    }
+    if (lowest) {
+      const child = children.get(lowest.name);
+      try {
+        child.kill('SIGSTOP');
+        setTimeout(() => { try { child.kill('SIGCONT'); } catch {} }, 5000).unref();
+      } catch {}
+    }
+  }
+
+  // Level 3: DARURAT — kill HANYA jika MemAvailable kritis (<32MB)
+  if (avail < 32) {
+    err('PRESSURE', `MemAvail ${avail}MB < 32MB — DARURAT, kill app prioritas terendah`);
+    pressureLevel = 3;
+    let victim = null; let lowestPri = Infinity;
+    for (const app of APPS) {
+      if (app.name === 'cloudflared-ssh' || app.name === INTERACTIVE_APP) continue;
+      if (!children.has(app.name)) continue;
+      if (app.priority < lowestPri) { lowestPri = app.priority; victim = app; }
+    }
+    if (victim) {
+      const child = children.get(victim.name);
+      restarting.set(victim.name, true);
+      try {
+        child.kill('SIGTERM');
+        setTimeout(() => { try { if (!child.killed) child.kill('SIGKILL'); } catch {} }, 3000).unref();
+      } catch {}
+    }
+  }
+}
+
+// ── Dynamic memory rebalancer — limit otomatis naik/turun sesuai kebutuhan ──────
+// TIDAK restart app. Hanya track & adjust limit untuk:
+//   (a) monitoring real-time
+//   (b) dipakai saat app restart berikutnya (NODE_OPTIONS --max-old-space-size)
+function rebalanceMemory() {
+  if (!isLinux) return;
+  const avail = readMemAvailMB();
+  if (avail == null) return;
+
+  // Collect usage info semua app yang berjalan
+  const usages = [];
+  let totalRss = 0;
   for (const app of APPS) {
-    // Jangan bunuh cloudflared (akses SSH) atau interactive app
-    if (app.name === 'cloudflared-ssh' || app.name === INTERACTIVE_APP) continue;
     const child = children.get(app.name);
     if (!child?.pid) continue;
-    const rss = readRssMB(child.pid) || 0;
-    if (rss > maxRss) { maxRss = rss; victim = app; }
+    const rss  = readRssMB(child.pid) || 0;
+    const peak = rssPeak.get(app.name) || rss;
+    totalRss += rss;
+    usages.push({ name: app.name, rss, peak, app });
   }
-  if (!victim) return;
+  if (usages.length === 0) return;
 
-  const child = children.get(victim.name);
-  warn('PRESSURE', `MemAvail ${avail}MB < ${PRESSURE_AVAIL_THRESHOLD_MB}MB → restart ${victim.name} (RSS ${maxRss}MB)`);
-  restarting.set(victim.name, true);
-  try {
-    child.kill('SIGTERM');
-    const killT = setTimeout(() => {
-      try { if (!child.killed) child.kill('SIGKILL'); } catch {}
-    }, 4000);
-    killT.unref();
-  } catch (e) { err(victim.name, 'pressure kill gagal:', e); }
+  // Hitung total allocated vs total used
+  let totalAllocated = 0;
+  for (const u of usages) totalAllocated += dynamicLimit.get(u.name) || 0;
+  const slack = Math.max(0, totalAllocated - totalRss);
+
+  // Redistribute: app yang peak-nya melewati limit dapat tambahan dari slack,
+  // app yang pakai jauh di bawah limit dikurangi (dengan headroom 30%)
+  for (const { name, rss, peak } of usages) {
+    const curLimit = dynamicLimit.get(name) || app.memoryMB;
+    // Minimum limit: actual RSS + 30% headroom, atau 64MB (mana lebih besar)
+    const minLimit = Math.max(64, Math.ceil(rss * 1.3));
+    let newLimit = curLimit;
+
+    if (peak > curLimit * 1.1 && slack > 32) {
+      // App butuh lebih: grow ambil dari slack, max 50% kebutuhan ekstra
+      const growBy = Math.min(slack * 0.5, Math.ceil((peak * 1.3 - curLimit) * 0.5));
+      if (growBy > 16) newLimit = curLimit + Math.floor(growBy);
+    } else if (rss < curLimit * 0.5 && curLimit > minLimit * 1.2) {
+      // App pakai jauh di bawah limit: shrink pelan-pelan ke minLimit
+      newLimit = Math.max(minLimit, Math.ceil(curLimit * 0.85));
+    }
+
+    // Clamp: max 50% budget per app, min minLimit
+    newLimit = Math.max(minLimit, Math.min(Math.floor(APP_BUDGET_MB * 0.5), newLimit));
+
+    if (Math.abs(newLimit - curLimit) > 16) {
+      dynamicLimit.set(name, newLimit);
+      log('MEMBALANCE', `${name}: ${curLimit}MB → ${newLimit}MB (rss=${rss}MB peak=${peak}MB slack=${Math.round(slack)}MB)`);
+    }
+  }
 }
 
 // ── stdout/stderr prefix pipe ─────────────────────────────────────────────────
@@ -655,7 +740,8 @@ function startApp(app) {
   if (children.has(app.name)) { warn(app.name, 'sudah berjalan, skip.'); return; }
 
   const isInteractive = app.name === INTERACTIVE_APP;
-  const memMB = safeNum(app.memoryMB, 512);
+  // Pakai dynamic limit kalau sudah ada, else initial allocation
+  const memMB = safeNum(dynamicLimit.get(app.name) || app.memoryMB, 512);
   const niceVal = clampNice(RESOURCE_MODE === 'custom' ? app.nice : NORMAL_NICE);
 
   // Bangun NODE_OPTIONS dengan max-old-space-size yang benar
@@ -702,7 +788,7 @@ function startApp(app) {
   restarting.set(app.name, true);
   curNice.set(app.name, niceVal);
   startedAt.set(app.name, Date.now());
-  startMemGuard(app, child);
+  startMemMonitor(app, child);
 
   log(app.name, `started | mem=${memMB}MB nice=${niceVal}${isInteractive ? ' [interactive]' : ''}`);
 
@@ -772,14 +858,19 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] mem-guard: soft=${MEM_GUARD_SOFT_RATIO}x hard=${MEM_GUARD_HARD_RATIO}x strikes=${MEM_GUARD_MAX_STRIKES}`);
+console.log(`[LAUNCHER] v3 — dinamis, minimal restart`);
+console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
+console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
 for (const app of APPS)
-  console.log(`[LAUNCHER]   ${app.name.padEnd(16)} mem=${safeNum(app.memoryMB,512)}MB`);
+  console.log(`[LAUNCHER]   ${app.name.padEnd(16)} init=${safeNum(app.memoryMB,512)}MB  priority=${app.priority}`);
 console.log(`[LAUNCHER] ══════════════════════════════════════════\n`);
 
-// ── Rebalance loop ────────────────────────────────────────────────────────────
+// ── Rebalance loop (CPU nice) ──────────────────────────────────────────────────
 setInterval(rebalanceNice, ADAPTIVE_INTERVAL).unref();
+
+// ── Memory rebalancer loop — redistribute budget tiap 10 detik ──────────────────
+setInterval(rebalanceMemory, 10000).unref();
 
 // ── Memory pressure detector loop ─────────────────────────────────────────────
 setInterval(checkMemoryPressure, PRESSURE_CHECK_INTERVAL_MS).unref();
