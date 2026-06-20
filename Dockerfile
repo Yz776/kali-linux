@@ -3,9 +3,10 @@ FROM kalilinux/kali-rolling
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-# Catatan perubahan (v2 — stabil + hemat RAM):
+# Catatan perubahan (v3 — stabil + cepat):
 #   • LANGCHAIN_AUTO_UPGRADE default = false  (sebelumnya true → npm install @latest tiap boot)
-#   • NODE_OPTIONS ditambah --max-semi-space-size=64 + --gc-interval=100 (GC lebih efisien)
+#   • NODE_OPTIONS ditambah --max-semi-space-size=64 (GC lebih efisien)
+#   • --gc-interval=100 DIHAPUS dari NODE_OPTIONS (tidak diizinkan Node.js di NODE_OPTIONS)
 #   • PATH tetap, untuk compat dengan script existing
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Jakarta \
@@ -13,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     # Node
     NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=384 --max-semi-space-size=64 --gc-interval=100 --expose-gc" \
+    NODE_OPTIONS="--max-old-space-size=384 --max-semi-space-size=64 --expose-gc" \
     # NPM – matikan semua yang lambat
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
@@ -242,7 +243,7 @@ EOF
 #      jika dilewati → backoff CRASH_LOOP_BACKOFF_MS
 #   5. Memory pressure detector: jika MemAvailable < threshold, restart app paling boros
 #   6. Rebalance loop di-throttle: skip jika tidak ada perubahan CPU signifikan
-#   7. NODE_OPTIONS per-app: --max-semi-space-size=64 + --gc-interval=100
+#   7. NODE_OPTIONS per-app: --max-semi-space-size=64 (gc-interval hanya via CLI)
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 // /data/launcher/index.js  (v2 — stabil + hemat RAM)
@@ -657,14 +658,15 @@ function startApp(app) {
   const memMB = safeNum(app.memoryMB, 512);
   const niceVal = clampNice(RESOURCE_MODE === 'custom' ? app.nice : NORMAL_NICE);
 
-  // Bangun NODE_OPTIONS dengan max-old-space-size yang benar + GC tuning
+  // Bangun NODE_OPTIONS dengan max-old-space-size yang benar
+  // CATATAN: --gc-interval TIDAK diizinkan di NODE_OPTIONS (V8 flag restricted)
+  // Jika perlu gc-interval tuning, pass via CLI di launcher script.
   const nodeOpts = (process.env.NODE_OPTIONS || '')
     .split(/\s+/)
     .filter(x => x && !x.startsWith('--max-old-space-size=') && !x.startsWith('--max-semi-space-size=') && !x.startsWith('--gc-interval='))
     .concat([
       `--max-old-space-size=${memMB}`,
       `--max-semi-space-size=64`,
-      `--gc-interval=100`,
       '--expose-gc',
     ])
     .join(' ');
@@ -1015,6 +1017,8 @@ PKGS="@langchain/core@latest @langchain/openai@latest @langchain/mcp-adapters@la
 grep -q '"@langchain/anthropic"' package.json 2>/dev/null && PKGS="$PKGS @langchain/anthropic@latest"
 grep -q '"@langchain/google'     package.json 2>/dev/null && PKGS="$PKGS @langchain/google-genai@latest"
 echo "[$APP_NAME] upgrade LangChain..."
+# Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
+export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
 npm install $PKGS --save --omit=dev --include=optional \
   --no-audit --no-fund --loglevel=error --prefer-offline \
   || echo "[$APP_NAME] WARN: upgrade gagal"
@@ -1051,6 +1055,8 @@ fi
 [ "$SKIP_NPM" = "true" ] && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; exit 0; }
 
 echo "[$APP_NAME] npm install..."
+# Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
+export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
 FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
 [ -f package-lock.json ] \
   && npm ci $FLAGS || npm install $FLAGS
@@ -1402,7 +1408,7 @@ const mem = {
   nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
-const nodeArgs = '--expose-gc --max-semi-space-size=64 --gc-interval=100 --max-http-header-size=16384';
+const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
 module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
