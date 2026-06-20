@@ -1,30 +1,21 @@
 FROM kalilinux/kali-rolling
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KILAT INTEGRATION (https://jolt.shannyie.web.id/)
+# STRATEGI HEMAT STORAGE
 # ───────────────────────────────────────────────────────────────────────────────
-# Kilat adalah runtime JavaScript ultra-ringan berbasis Go (engine Goja) untuk
-# Termux & Linux. Binary tunggal ±5-10MB, tanpa V8 engine.
+# 1. pnpm (UTAMA) — global store + hardlinks untuk semua app Node.js sungguhan.
+#    Deps yang sama di-share antar app tanpa duplikasi. Hemat 50-70%.
+# 2. strip-node-modules.sh — hapus *.md, *.ts, test files, docs, examples,
+#    build artifacts dari node_modules setelah install. Hemat 30-60% tambahan.
+# 3. npm/pnpm cache clean — hapus cache setelah install selesai.
+# 4. Kilat (OPSIONAL, manual only) — runtime JS ringan untuk script sederhana.
+#    Tidak bisa run app Node.js sungguhan (module bawaan terbatas: console/fs/os/net).
+#    Pakai manual: `kilat run hello.js` untuk quick script tanpa node_modules.
 #
-# Keuntungan storage:
-#   • Tidak ada node_modules duplikat per-proyek (yang biasanya ratusan MB).
-#   • Semua package disimpan terpusat di /data/root/.kilat/packages/ — sekali
-#     install, semua app pakai bersama (mirip pnpm store tapi lebih ringan).
-#   • Cocok untuk app Node.js sederhana yang hanya butuh CommonJS + fs/os/net/console.
-#
-# Cara pakai per-app (opt-in, default TIDAK aktif):
-#   1. ENV per-app di docker run:
-#        -e USE_KILAT=true -e KILAT_ENABLED_APPS=ttt,nexcloud
-#   2. Atau tambahkan field di package.json app:
-#        { "name": "ttt", "kilat": true, ... }
-#   3. App tetap pakai Node.js jika package-butuh-native (esbuild, sharp, canvas,
-#      langchain, dll). Deteksi otomatis: jika opt-in tapi binary kilat tidak ada
-#      atau app memakai native deps, fallback ke Node.js.
-#
-# Cara cek di container:
-#   kilat --version
-#   kilat run hello.js
-#   kilat add lodash
+# Cara pakai:
+#   - App Node.js (kfai/ttt/nexcloud): otomatis pakai pnpm + strip. Tidak perlu
+#     konfigurasi tambahan.
+#   - Script sederhana: `kilat run script.js` (manual, setelah `kilat add <dep>`)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -57,16 +48,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_CACHE=/data/root/.npm \
     PATH="/data/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     # ── Kilat (https://jolt.shannyie.web.id/) ──────────────────────────────────
-    # Runtime JavaScript ringan berbasis Go (engine Goja) yang menggantikan node_modules
-    # per-proyek dengan direktori paket terpusat. Pakai untuk app Node.js sederhana
-    # agar tidak membengkakkan storage.
+    # Runtime JavaScript ringan berbasis Go (engine Goja). HANYA untuk script
+    # sederhana (console/fs/os/net). Tidak bisa run app Node.js sungguhan.
+    # Manual use: kilat run script.js | kilat add <pkg>
     KILAT_VERSION=v0.3.0 \
     KILAT_HOME=/data/root/.kilat \
     KILAT_PACKAGES_DIR=/data/root/.kilat/packages \
-    # Set USE_KILAT=true per-app (di env run-kfai-nodejs.sh dll) untuk pakai Kilat
-    USE_KILAT=false \
-    # Daftar app yang boleh pakai Kilat (CSV). Default: kosong = per-app opt-in via ENV.
-    KILAT_ENABLED_APPS="" \
+    # ── pnpm (strategi utama hemat storage untuk app Node.js sungguhan) ────────
+    # Global store + hardlinks → deps shared antar app tanpa duplikasi.
+    PNPM_HOME=/data/root/.local/share/pnpm \
+    PNPM_STORE_DIR=/data/root/.pnpm-store \
     # Git
     GIT_TERMINAL_PROMPT=0 \
     GIT_HTTP_LOW_SPEED_LIMIT=1000 \
@@ -201,6 +192,29 @@ RUN set -eux; \
     /usr/local/bin/kilat --version 2>/dev/null || echo "Kilat binary terpasang tapi --version gagal."; \
     mkdir -p /data/root/.kilat/packages; \
     chmod 755 /data/root/.kilat
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 3.6 – pnpm (efficient package manager with global store + hardlinks)
+# ───────────────────────────────────────────────────────────────────────────────
+# pnpm adalah strategi utama untuk hemat storage pada app Node.js sungguhan:
+#   • Global store di /data/root/.pnpm-store — setiap versi package disimpan
+#     PERSIS SATU KALI di seluruh container.
+#   • node_modules/ di setiap app berisi hardlink ke global store (bukan copy).
+#   • 4 app yang share lodash@4.17.21 → lodash hanya ambil storage 1x, bukan 4x.
+#   • Rata-rata hemat 50-70% dibanding npm install per-app.
+#
+# Kontras dengan Kilat (yang hanya untuk script sederhana):
+#   Kilat TIDAK bisa run app Node.js sungguhan karena module bawaannya hanya
+#   console/fs/os/net — tidak ada http.Server, Buffer, stream, crypto, path,
+#   events, child_process. Jadi app kfai/ttt/nexcloud WAJIB pakai Node.js + pnpm.
+# ═══════════════════════════════════════════════════════════════════════════════
+RUN set -eux; \
+    npm install -g pnpm@latest --no-audit --no-fund --loglevel=error; \
+    pnpm config set store-dir /data/root/.pnpm-store --global; \
+    pnpm config set prefer-offline true --global; \
+    pnpm config set reporter silent --global; \
+    mkdir -p /data/root/.pnpm-store; \
+    pnpm --version
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 – Direktori + SSH host keys pre-generated
@@ -812,14 +826,138 @@ npm install $PKGS --save --omit=dev --include=optional \
 npm cache clean --force >/dev/null 2>&1 || true
 SCRIPT
 
+# ─── strip-node-modules.sh ────────────────────────────────────────────────────
+# Hapus file non-esensial dari node_modules untuk minimalisasi storage.
+# Aman dijalankan setelah npm/pnpm install — hanya hapus:
+#   - Dokumentasi (*.md, *.markdown, CHANGELOG, AUTHORS, HISTORY)
+#   - Source TypeScript (*.ts, *.tsx) — keep .js & .d.ts
+#   - File test (__tests__/, test/, tests/, *.test.js, *.spec.js)
+#   - Examples & docs (examples/, example/, docs/, doc/)
+#   - CI/CD (.github/, .travis.yml, .eslintrc, .prettierrc)
+#   - Build artifacts (*.tsbuildinfo, .cache/, .turbo/, build/)
+#   - Misc (.npmignore, .gitignore, .DS_Store, *.flow, LICENSE di subfolder)
+# Estimasi penghematan: 30-60% ukuran node_modules.
+RUN cat > /usr/local/bin/strip-node-modules.sh <<'SCRIPT'
+#!/usr/bin/env bash
+# strip-node-modules.sh — minimalisasi storage node_modules
+set -uo pipefail
+APP_NAME="${1:-app}"
+APP_DIR="${2:-.}"
+NM_DIR="$APP_DIR/node_modules"
+
+[ ! -d "$NM_DIR" ] && { echo "[$APP_NAME] strip: node_modules tidak ada, skip."; exit 0; }
+
+BEFORE=$(du -sb "$NM_DIR" 2>/dev/null | cut -f1)
+BEFORE_HUMAN=$(du -sh "$NM_DIR" 2>/dev/null | cut -f1)
+echo "[$APP_NAME] strip: mulai (size before: $BEFORE_HUMAN)"
+
+# Helper: hapus aman (tidak error kalau tidak ada)
+# PENTING: semua find pakai -mindepth 1 agar TIDAK menghapus root $NM_DIR sendiri.
+rm_silent() { find "$NM_DIR" -mindepth 1 "$@" 2>/dev/null -delete || true; }
+rm_silent_dir() { find "$NM_DIR" -mindepth 1 -type d "$@" 2>/dev/null -exec rm -rf {} + 2>/dev/null || true; }
+
+# ── Dokumentasi ──────────────────────────────────────────────────────────────
+rm_silent -type f \( -name "*.md" -o -name "*.markdown" -o -name "*.MD" \)
+rm_silent -type f \( -name "CHANGELOG*" -o -name "CHANGES*" -o -name "HISTORY*" -o -name "AUTHORS*" -o -name "CONTRIBUTORS*" \)
+rm_silent -type f -name "README*" 2>/dev/null
+
+# ── Source TypeScript (keep .js, .json, .d.ts, .node) ────────────────────────
+# .ts & .tsx = source, hapus. .d.ts = type declarations, keep untuk IDE/typing.
+rm_silent -type f \( -name "*.ts" ! -name "*.d.ts" \)
+rm_silent -type f -name "*.tsx"
+
+# ── File test ────────────────────────────────────────────────────────────────
+rm_silent_dir -name "__tests__" -o -name "__test__" -o -name "test" -o -name "tests" -o -name "__mocks__"
+rm_silent -type f \( -name "*.test.js" -o -name "*.test.jsx" -o -name "*.test.mjs" \
+                   -o -name "*.spec.js" -o -name "*.spec.jsx" -o -name "*.spec.mjs" \)
+
+# ── Examples & docs ──────────────────────────────────────────────────────────
+rm_silent_dir -name "examples" -o -name "example" -o -name "docs" -o -name "doc" -o -name "documentation"
+
+# ── CI/CD & linter configs ───────────────────────────────────────────────────
+rm_silent_dir -name ".github" -o -name ".circleci" -o -name ".vscode" -o -name ".idea"
+rm_silent -type f \( -name ".travis.yml" -o -name "appveyor.yml" -o -name ".eslintrc*" \
+                   -o -name ".prettierrc*" -o -name ".babelrc*" -o -name "jest.config*" \
+                   -o -name ".mocharc*" -o -name ".nycrc*" \)
+
+# ── Build artifacts & caches ─────────────────────────────────────────────────
+rm_silent -type f -name "*.tsbuildinfo"
+# Hapus folder cache & build artifacts — HANYA yang nested (mindepth 2),
+# JANGAN hapus root node_modules dir itu sendiri!
+find "$NM_DIR" -mindepth 2 -type d \( -name ".cache" -o -name ".turbo" -o -name ".parcel-cache" \) \
+  2>/dev/null -exec rm -rf {} + 2>/dev/null || true
+# Hapus folder "build" di kedalaman > 2 (jangan hapus root build/ app atau root node_modules)
+find "$NM_DIR" -mindepth 3 -type d -name "build" 2>/dev/null -exec rm -rf {} + 2>/dev/null || true
+
+# ── Node-gyp / prebuild artifacts ────────────────────────────────────────────
+# Hapus source .gyp (build config, tidak dibutuhkan runtime) tapi KEEP prebuilds
+# (native modules seperti sharp/better-sqlite3 butuh prebuilds untuk binary).
+rm_silent -type f \( -name "*.gyp" -o -name "binding.gyp" -o -name "*.pdb" \)
+rm_silent -type f \( -name "*.c" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" \) 2>/dev/null || true
+
+# ── Misc cleanup ─────────────────────────────────────────────────────────────
+rm_silent -type f \( -name ".npmignore" -o -name ".gitignore" -o -name ".DS_Store" \
+                   -o -name "Thumbs.db" -o -name "*.flow" -o -name "*.bak" -o -name "*.swp" \)
+# LICENSE di subfolder (depth >= 2) — keep root LICENSE saja
+find "$NM_DIR" -mindepth 2 -type f \( -name "LICENSE*" -o -name "LICENCE*" -o -name "COPYING*" \) \
+  2>/dev/null -delete || true
+# File .editorconfig, .gitattributes di subfolder
+find "$NM_DIR" -mindepth 2 -type f \( -name ".editorconfig" -o -name ".gitattributes" \) \
+  2>/dev/null -delete || true
+
+# ── Hapus folder kosong ──────────────────────────────────────────────────────
+find "$NM_DIR" -type d -empty 2>/dev/null -delete || true
+
+# ── Report ───────────────────────────────────────────────────────────────────
+AFTER=$(du -sb "$NM_DIR" 2>/dev/null | cut -f1)
+AFTER_HUMAN=$(du -sh "$NM_DIR" 2>/dev/null | cut -f1)
+if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" -gt 0 ]; then
+  SAVED=$(( (BEFORE - AFTER) * 100 / BEFORE ))
+  echo "[$APP_NAME] strip: $BEFORE_HUMAN → $AFTER_HUMAN (hemat ${SAVED}%)"
+else
+  echo "[$APP_NAME] strip: selesai (size after: $AFTER_HUMAN)"
+fi
+SCRIPT
+
 # ─── ensure-node-app-deps.sh ──────────────────────────────────────────────────
+# Pasang deps untuk app Node.js sungguhan. Strategi hemat storage:
+#   1. pnpm install (global store + hardlinks → dedup antar app)
+#   2. strip-node-modules.sh (hapus *.md, *.ts, test, docs, dll)
+#   3. pnpm prune --production (hapus dev deps yang tersangkut)
+#   4. pnpm store prune (cleanup global store dari versi tidak terpakai)
+# Fallback ke npm ci/install kalau pnpm tidak ada atau gagal.
 RUN cat > /usr/local/bin/ensure-node-app-deps.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 APP_NAME="$1"; APP_DIR="$2"
 ZIP_FILE="${3:-node_modules.zip}"; USE_ZIP="${4:-true}"; SKIP_NPM="${5:-false}"
 cd "$APP_DIR"
-[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." && exit 1
+[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; exit 1; }
+
+# Pastikan pnpm store dir ada
+export PNPM_HOME="${PNPM_HOME:-/data/root/.local/share/pnpm}"
+export PNPM_STORE_DIR="${PNPM_STORE_DIR:-/data/root/.pnpm-store}"
+mkdir -p "$PNPM_STORE_DIR"
+
+# ── Helper: cek apakah pnpm available & bisa dipakai ────────────────────────
+has_pnpm() { command -v pnpm >/dev/null 2>&1; }
+
+# ── Helper: jalankan strip setelah install ──────────────────────────────────
+post_install_optimize() {
+  echo "[$APP_NAME] optimize: strip node_modules..."
+  /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
+  echo "[$APP_NAME] optimize: prune dev deps..."
+  if has_pnpm && [ -f pnpm-lock.yaml ]; then
+    pnpm prune --prod 2>/dev/null || true
+  else
+    npm prune --omit=dev 2>/dev/null || true
+  fi
+  echo "[$APP_NAME] optimize: clean cache..."
+  if has_pnpm; then
+    pnpm store prune 2>/dev/null || true
+  fi
+  npm cache clean --force 2>/dev/null || true
+}
 
 extract_zip() {
   [ ! -f "$1" ] && return 1
@@ -830,36 +968,81 @@ extract_zip() {
     && mv node_modules.tmp/node_modules ./node_modules \
     || mv node_modules.tmp ./node_modules
   rm -rf node_modules.tmp
-  find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q . \
-    && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; return 0; }
+  if find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q .; then
+    /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
+    /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
+    return 0
+  fi
   rm -rf node_modules; return 1
 }
 
+# ── 1. Coba pakai node_modules.zip dulu (pre-bundled) ───────────────────────
 if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
-  echo "[$APP_NAME] pakai node_modules dari zip."
+  echo "[$APP_NAME] pakai node_modules dari zip (sudah di-strip)."
   exit 0
 fi
-[ "$SKIP_NPM" = "true" ] && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; exit 0; }
 
-echo "[$APP_NAME] npm install..."
-FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
-[ -f package-lock.json ] \
-  && npm ci $FLAGS || npm install $FLAGS
-npm rebuild --loglevel=error || true
-node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
-  || npm install dotenv --save --omit=dev --no-audit --no-fund --prefer-offline
-/usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-npm cache clean --force || true
-echo "[$APP_NAME] deps siap."
+# ── 2. Skip install jika diminta (dev mode / cache sudah ada) ───────────────
+[ "$SKIP_NPM" = "true" ] && {
+  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
+  /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
+  exit 0
+}
+
+# ── 3. Install via pnpm (preferred) atau npm (fallback) ─────────────────────
+if has_pnpm; then
+  echo "[$APP_NAME] pnpm install (global store + hardlinks)..."
+  # pnpm lebih hemat storage: hardlink ke global store, bukan copy
+  # --node-linker=hoisted: layout node_modules flat (kompatibel dengan app
+  #   yang assume node_modules tradisional, mis. require('sub-dep') langsung)
+  # --prod: hanya dependencies (skip devDependencies)
+  # Note: optional deps tetap diinstall (dibutuhkan untuk native modules seperti
+  #   @esbuild/linux-x64, @rollup/rollup-linux-x64-gnu, sharp, dll)
+  PNPM_FLAGS="--prod --node-linker=hoisted --reporter=silent --prefer-offline"
+  # Kalau ada pnpm-lock.yaml, pakai --frozen-lockfile untuk reproducible
+  if [ -f pnpm-lock.yaml ]; then
+    pnpm install $PNPM_FLAGS --frozen-lockfile 2>&1 | sed "s/^/[$APP_NAME] /" || {
+      echo "[$APP_NAME] pnpm frozen install gagal, coba tanpa frozen..."
+      pnpm install $PNPM_FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
+    }
+  else
+    # Generate pnpm-lock.yaml dari package.json
+    pnpm install $PNPM_FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
+  fi
+  # Pastikan dotenv ada (dibutuhkan oleh launcher)
+  node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
+    || pnpm add dotenv --prod --node-linker=hoisted --reporter=silent 2>/dev/null || true
+  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
+else
+  echo "[$APP_NAME] npm install (pnpm tidak tersedia)..."
+  FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
+  if [ -f package-lock.json ]; then
+    npm ci $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /" || npm install $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
+  else
+    npm install $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
+  fi
+  npm rebuild --loglevel=error || true
+  node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
+    || npm install dotenv --save --omit=dev --no-audit --no-fund --prefer-offline
+  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
+fi
+
+# ── 4. Post-install optimization ────────────────────────────────────────────
+post_install_optimize
+
+# ── 5. Report storage ───────────────────────────────────────────────────────
+NM_SIZE="(none)"
+[ -d node_modules ] && NM_SIZE=$(du -sh node_modules 2>/dev/null | cut -f1)
+STORE_SIZE=$(du -sh "$PNPM_STORE_DIR" 2>/dev/null | cut -f1)
+echo "[$APP_NAME] deps siap. node_modules=$NM_SIZE, pnpm-store=$STORE_SIZE"
 SCRIPT
 
 # ─── run-node-app.sh ──────────────────────────────────────────────────────────
-# Router runtime: pilih Kilat atau Node.js berdasarkan opt-in.
-# Kilat dipakai jika SALAH SATU kondisi true:
-#   1. ENV USE_KILAT=true (di-set per-app di run-<app>.sh), atau
-#   2. package.json punya field "kilat": true, atau
-#   3. APP_NAME tercatat di ENV KILAT_ENABLED_APPS (CSV, mis. "ttt,nexcloud")
-# Jika kilat binary tidak ada / opt-in tidak aktif → tetap pakai Node.js.
+# Jalankan app Node.js dengan deps management hemat storage (pnpm + strip).
+# Kilat TIDAK di-auto-route di sini — Kilat hanya untuk script manual
+# (jalankan langsung: `kilat run script.js`). App Node.js sungguhan selalu
+# pakai Node.js karena Kilat v0.3.0 tidak punya module inti Node (http, Buffer,
+# stream, crypto, path, events, child_process).
 RUN cat > /usr/local/bin/run-node-app.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -867,537 +1050,12 @@ APP_NAME="$1"; APP_DIR="$2"; ENTRY_DEFAULT="${3:-server.js}"
 ZIP_FILE="${4:-node_modules.zip}"; USE_ZIP="${5:-true}"; SKIP_NPM="${6:-false}"
 NODE_EXTRA="${7:-}"
 
-[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+[ ! -d "$APP_DIR" ] && { echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2; sleep 10; exit 1; }
 cd "$APP_DIR"
-[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
+[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; sleep 10; exit 1; }
 
-# ── Deteksi opt-in Kilat ─────────────────────────────────────────────────────
-use_kilat=false
-if [ "${USE_KILAT:-false}" = "true" ]; then
-  use_kilat=true
-elif command -v node >/dev/null 2>&1 && \
-     node -e 'const p=require("./package.json");process.exit(p.kilat===true?0:1)' 2>/dev/null; then
-  use_kilat=true
-elif [ -n "${KILAT_ENABLED_APPS:-}" ] && \
-     echo ",${KILAT_ENABLED_APPS}," | grep -q ",${APP_NAME},"; then
-  use_kilat=true
-fi
-
-if [ "$use_kilat" = "true" ]; then
-  if command -v kilat >/dev/null 2>&1; then
-    echo "[$APP_NAME] opt-in Kilat aktif → jalankan via Kilat (hemat storage, tanpa node_modules lokal)."
-    # run-kilat-app.sh exit code:
-    #   0 = sukses (exec kilat, tidak return)
-    #   2 = minta fallback ke Node.js (kilat binary hilang, ESM, atau masalah lain)
-    #   lain = error fatal
-    /usr/local/bin/run-kilat-app.sh "$APP_NAME" "$APP_DIR" "$ENTRY_DEFAULT"
-    rc=$?
-    if [ "$rc" -ne 2 ]; then
-      exit "$rc"
-    fi
-    echo "[$APP_NAME] fallback ke Node.js (Kilat exit $rc)."
-  else
-    echo "[$APP_NAME] opt-in Kilat aktif tapi binary kilat tidak tersedia → fallback Node.js."
-  fi
-fi
-
-# ── Mode Node.js (default, behavior lama) ────────────────────────────────────
+# ── Pasang deps (pnpm preferred, npm fallback) + strip + prune ──────────────
 /usr/local/bin/ensure-node-app-deps.sh "$APP_NAME" "$APP_DIR" "$ZIP_FILE" "$USE_ZIP" "$SKIP_NPM"
-
-ENTRY="$ENTRY_DEFAULT"
-if [ ! -f "$ENTRY" ]; then
-  for f in server.js server-langchain.js index.js; do
-    [ -f "$f" ] && ENTRY="$f" && break
-  done
-fi
-if [ ! -f "$ENTRY" ]; then
-  npm run 2>/dev/null | grep -qE '^\s+start\b' \
-    && exec /usr/local/bin/clear-app-port-env.sh npm start \
-    || { echo "[$APP_NAME] entry point tidak ditemukan." >&2; sleep 10; exit 1; }
-fi
-
-echo "[$APP_NAME] start: node $NODE_EXTRA $ENTRY"
-exec /usr/local/bin/clear-app-port-env.sh node $NODE_EXTRA "$ENTRY"
-SCRIPT
-
-# ─── kilat-doctor.sh ──────────────────────────────────────────────────────────
-# Diagnostic helper: cek instalasi Kilat & cache packages.
-# Jalankan via SSH: kilat-doctor
-RUN cat > /usr/local/bin/kilat-doctor <<'SCRIPT'
-#!/usr/bin/env bash
-# kilat-doctor — cek instalasi Kilat dan cache packages
-set +e
-C='\033[1;36m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'; N='\033[0m'
-
-printf "${C}== Kilat Binary ==${N}\n"
-if command -v kilat >/dev/null 2>&1; then
-  printf "  ${G}✓${N} kilat: $(command -v kilat)\n"
-  kilat --version 2>&1 | sed 's/^/  /'
-else
-  printf "  ${R}✗ kilat tidak ditemukan di PATH${N}\n"
-  echo "  PATH=$PATH"
-  exit 1
-fi
-
-printf "\n${C}== Environment ==${N}\n"
-echo "  KILAT_HOME=${KILAT_HOME:-<unset, default /data/root/.kilat>}"
-echo "  KILAT_PACKAGES_DIR=${KILAT_PACKAGES_DIR:-<unset, default \$KILAT_HOME/packages>}"
-echo "  USE_KILAT=${USE_KILAT:-false}"
-echo "  KILAT_ENABLED_APPS=${KILAT_ENABLED_APPS:-<kosong>}"
-
-# KILAT_PACKAGES_DIR actual (resolve default)
-KH="${KILAT_HOME:-/data/root/.kilat}"
-KPD="${KILAT_PACKAGES_DIR:-$KH/packages}"
-
-printf "\n${C}== Cache Directory ==${N}\n"
-echo "  Lokasi: $KPD"
-if [ -d "$KPD" ]; then
-  PKGS=$(find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-  SIZE=$(du -sh "$KPD" 2>/dev/null | cut -f1)
-  printf "  ${G}✓${N} ada, $PKGS paket, $SIZE\n"
-  if [ "$PKGS" -gt 0 ]; then
-    echo "  Daftar paket:"
-    find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | sed 's|^|    - |' | head -30
-    [ "$PKGS" -gt 30 ] && echo "    ... ($(($PKGS - 30)) paket lagi)"
-  fi
-else
-  printf "  ${Y}⚠ cache dir belum dibuat${N}\n"
-fi
-
-printf "\n${C}== Test require() ==${N}\n"
-TEST_DIR=$(mktemp -d)
-cat > "$TEST_DIR/test.js" <<'JS'
-try {
-  const lodash = require('lodash');
-  console.log('  ✓ lodash OK, version:', lodash.VERSION);
-} catch (e) {
-  console.log('  ✗ lodash gagal:', e.message);
-}
-try {
-  const dotenv = require('dotenv');
-  console.log('  ✓ dotenv OK');
-} catch (e) {
-  console.log('  ✗ dotenv gagal:', e.message);
-}
-JS
-cd "$TEST_DIR"
-kilat run test.js 2>&1 | sed 's/^/  /'
-cd - >/dev/null
-rm -rf "$TEST_DIR"
-
-printf "\n${C}== Hybrid Mode (node_modules fallback) per-app ==${N}\n"
-for app_dir in /data/apps/*/; do
-  [ -d "$app_dir" ] || continue
-  app_name=$(basename "$app_dir")
-  if [ -d "$app_dir/node_modules" ] && [ -f "$app_dir/node_modules/.kilat-managed" ]; then
-    NM_COUNT=$(find "$app_dir/node_modules" -mindepth 1 -maxdepth 1 -type d ! -name '.kilat-managed' 2>/dev/null | wc -l)
-    NM_SIZE=$(du -sh "$app_dir/node_modules" 2>/dev/null | cut -f1)
-    printf "  ${G}✓${N} %s: %s paket di node_modules/ (%s) — fallback untuk yang gagal di cache Kilat\n" "$app_name" "$NM_COUNT" "$NM_SIZE"
-  fi
-done
-
-printf "\n${C}== Apps opt-in Kilat ==${N}\n"
-for app_dir in /data/apps/*/; do
-  [ -d "$app_dir" ] || continue
-  app_name=$(basename "$app_dir")
-  [ -f "$app_dir/package.json" ] || continue
-  if node -e 'const p=require(process.argv[1]+"/package.json");process.exit(p.kilat===true?0:1)' "$app_dir" 2>/dev/null; then
-    printf "  ${G}✓${N} %s (package.json: kilat=true)\n" "$app_name"
-  elif echo ",${KILAT_ENABLED_APPS:-}," | grep -q ",$app_name,"; then
-    printf "  ${G}✓${N} %s (KILAT_ENABLED_APPS)\n" "$app_name"
-  else
-    printf "  ${Y}○${N} %s (default Node.js)\n" "$app_name"
-  fi
-done
-
-echo
-echo "Tips:"
-echo "  - Pasang paket manual: kilat add <pkg>"
-echo "  - Hapus cache: rm -rf $KPD/*"
-echo "  - Test app: cd /data/apps/<app> && kilat run server.js"
-SCRIPT
-
-# ─── ensure-kilat-deps.sh ─────────────────────────────────────────────────────
-# Pasang dependencies app ke cache Kilat terpusat (~/.kilat/packages/).
-# Strategi: npm pack + extract (lebih reliable daripada `kilat add` yang
-# sering 404 untuk package tertentu), dengan fallback ke `kilat add`.
-# Dipanggil oleh run-node-app.sh ketika USE_KILAT=true.
-RUN cat > /usr/local/bin/ensure-kilat-deps.sh <<'SCRIPT'
-#!/usr/bin/env bash
-# ensure-kilat-deps.sh — pasang dependencies app ke cache Kilat terpusat.
-#
-# Strategi (setelah pelajaran 404 dari `kilat add`):
-#   1. Pakai `npm pack` (resolusi penuh dari registry.npmjs.org resmi) untuk
-#      download tarball setiap dep — ini selalu berhasil selama npm jalan.
-#   2. Extract tarball ke $KILAT_PACKAGES_DIR/<pkg-name>/ — inilah format yang
-#      sama persis dengan yang `kilat add` hasilkan, sehingga `kilat run` bisa
-#      me-resolve `require('<pkg-name>')` dari cache tanpa perlu `kilat add`.
-#   3. Fallback: kalau `npm pack` gagal (mis. scoped package atau versi exotic),
-#      coba `kilat add` sebagai upaya terakhir.
-#   4. Resolve sub-dependensi transitif juga via `npm pack --dry-run` JSON
-#      output, lalu pack semua subtree (dfs 1 level untuk performa).
-#
-# Cache layout (kompatibel dengan kilat add output):
-#   $KILAT_PACKAGES_DIR/<pkg-name>/package.json
-#   $KILAT_PACKAGES_DIR/<pkg-name>/index.js
-#   $KILAT_PACKAGES_DIR/<pkg-name>/...
-#
-# Robustness:
-#   - Parser JSON pakai node (sudah ada di image).
-#   - Strip prefix versi (^, ~, >=, v) sebelum kirim ke npm pack.
-#   - Skip "file:", "link:", "workspace:", "git+", "github:", path lokal.
-#   - Cache hit check: kalau folder paket sudah ada & ada package.json, skip.
-#   - Retry 2x per package kalau transient network error.
-#   - Exit 0 walau ada yang gagal — app tetap dicoba jalan.
-set -uo pipefail
-APP_NAME="$1"; APP_DIR="$2"
-cd "$APP_DIR" || { echo "[$APP_NAME] tidak bisa cd ke $APP_DIR" >&2; exit 1; }
-[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; exit 1; }
-
-if ! command -v kilat >/dev/null 2>&1; then
-  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js." >&2
-  exit 2
-fi
-if ! command -v npm >/dev/null 2>&1; then
-  echo "[$APP_NAME] npm tidak tersedia — tidak bisa resolve deps untuk Kilat." >&2
-  exit 2
-fi
-
-# Pastikan direktori cache Kilat ada
-KILAT_CACHE="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
-mkdir -p "$KILAT_CACHE"
-export KILAT_HOME="${KILAT_HOME:-/data/root/.kilat}"
-
-# Direktori sementara untuk npm pack (tarball download)
-PACK_TMP="$(mktemp -d)"
-trap 'rm -rf "$PACK_TMP"' EXIT
-
-# ── Helper: pasang satu paket ke cache Kilat ───────────────────────────────
-# Argumen: <pkg-name> <raw-version>
-# Return: 0 = sukses (cache terisi), 1 = gagal
-install_pkg_to_kilat_cache() {
-  local name="$1" raw_ver="${2:-}"
-  local clean_ver=""
-  local spec="$name"
-
-  # Cek cache hit dulu
-  if [ -d "$KILAT_CACHE/$name" ] && [ -f "$KILAT_CACHE/$name/package.json" ]; then
-    echo "[$APP_NAME] ✓ cache hit: $name (skip)"
-    return 0
-  fi
-
-  # Normalisasi versi
-  if [ -n "$raw_ver" ]; then
-    local v="${raw_ver#^}"  # strip ^
-    v="${v#~}"
-    v="${v#>=}"
-    v="${v#<=}"
-    v="${v#>}"
-    v="${v#<}"
-    v="${v#v}"
-    v="${v#=}"
-    v="$(echo "$v" | tr -d ' ')"
-    if [ -n "$v" ] && [ "$v" != "latest" ] && \
-       ! echo "$v" | grep -qE '^(file:|link:|workspace:|git\+|github:|https?:|/|\.)'; then
-      clean_ver="$v"
-      spec="${name}@${clean_ver}"
-    fi
-  fi
-
-  echo "[$APP_NAME] install: $spec"
-
-  # ── Strategi 1: npm pack (selalu pakai registry.npmjs.org resmi) ────────
-  local tarball=""
-  local pack_output
-  pack_output="$(cd "$PACK_TMP" && npm pack "$spec" --no-audit --no-fund --loglevel=error --prefer-offline 2>&1)" || true
-  # Output npm pack = path ke .tgz di baris terakhir
-  tarball="$(echo "$pack_output" | tail -n1 | tr -d '[:space:]')"
-  if [ -n "$tarball" ] && [ -f "$tarball" ]; then
-    local staging="$PACK_TMP/extract-$name"
-    mkdir -p "$staging"
-    if tar -xzf "$tarball" -C "$staging" 2>/dev/null; then
-      # Isi tarball ada di subfolder "package/"
-      if [ -d "$staging/package" ]; then
-        rm -rf "$KILAT_CACHE/$name"
-        mkdir -p "$KILAT_CACHE/$name"
-        # Pakai cp -a untuk preserve perms & timestamps
-        cp -a "$staging/package/." "$KILAT_CACHE/$name/" 2>/dev/null || \
-          cp -r "$staging/package/." "$KILAT_CACHE/$name/" 2>/dev/null
-        rm -rf "$staging"
-        if [ -f "$KILAT_CACHE/$name/package.json" ]; then
-          echo "[$APP_NAME] ✓ npm pack: $name → $KILAT_CACHE/$name"
-          # Install sub-dependensi transitif (1 level untuk performa)
-          install_subdeps "$name"
-          return 0
-        fi
-      fi
-    fi
-    rm -rf "$staging" "$tarball"
-  fi
-
-  # ── Strategi 2: fallback ke kilat add ───────────────────────────────────
-  echo "[$APP_NAME] npm pack gagal untuk $spec, coba kilat add..."
-  for attempt in 1 2; do
-    if kilat add "$spec" 2>&1 | sed "s/^/[$APP_NAME] /"; then
-      if [ -d "$KILAT_CACHE/$name" ] && [ -f "$KILAT_CACHE/$name/package.json" ]; then
-        echo "[$APP_NAME] ✓ kilat add: $name → $KILAT_CACHE/$name"
-        return 0
-      fi
-    fi
-    [ "$attempt" -lt 2 ] && { echo "[$APP_NAME] retry kilat add $spec (attempt $attempt/2)..."; sleep 1; }
-  done
-
-  echo "[$APP_NAME] ✗ gagal install $spec (npm pack & kilat add keduanya gagal)"
-  return 1
-}
-
-# ── Helper: pasang sub-dependensi transitif (1 level dfs) ──────────────────
-# Kenapa 1 level: Kilat me-resolve require('sub-dep') dengan mencari di cache
-# juga, jadi sub-dep harus ada. Tapi kita tidak recursive full — itu lambat &
-# biasanya Kilat cuma butuh 1 level untuk common case.
-install_subdeps() {
-  local parent="$1"
-  local pj="$KILAT_CACHE/$parent/package.json"
-  [ ! -f "$pj" ] && return 0
-  # Ambil dependencies (prod only) dari package.json paket
-  local subs
-  subs=$(node -e '
-    const fs = require("fs");
-    try {
-      const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      const deps = p.dependencies || {};
-      const out = [];
-      for (const [n, v] of Object.entries(deps)) out.push(n + "\t" + (v || ""));
-      // Trailing newline agar loop while IFS=$'"'"'\t'"'"' read akurat
-      process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : ""));
-    } catch (e) { /* ignore */ }
-  ' "$pj" 2>/dev/null)
-  [ -z "$subs" ] && return 0
-  local sub_count=0
-  while IFS=$'\t' read -r sub_name sub_ver; do
-    [ -z "$sub_name" ] && continue
-    [ -d "$KILAT_CACHE/$sub_name" ] && [ -f "$KILAT_CACHE/$sub_name/package.json" ] && continue
-    install_pkg_to_kilat_cache "$sub_name" "$sub_ver" && sub_count=$((sub_count+1))
-  done <<< "$subs"
-  [ "$sub_count" -gt 0 ] && echo "[$APP_NAME] ✓ $parent: $sub_count sub-dep di-cache"
-}
-
-# ── Ekstrak dependencies dari package.json app ─────────────────────────────
-DEPS_FILE="$(mktemp)"
-node -e '
-  const fs = require("fs");
-  let pkg;
-  try { pkg = JSON.parse(fs.readFileSync("./package.json", "utf8")); }
-  catch (e) { process.stderr.write("parse package.json gagal: " + e.message + "\n"); process.exit(0); }
-  const deps = Object.assign({}, pkg.dependencies || {});
-  const out = [];
-  for (const [name, raw] of Object.entries(deps)) {
-    if (!name) continue;
-    out.push(name + "\t" + String(raw || ""));
-  }
-  // Tambah newline trailing agar wc -l akurat
-  process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : ""));
-' > "$DEPS_FILE" 2>/dev/null || true
-
-if [ ! -s "$DEPS_FILE" ]; then
-  echo "[$APP_NAME] tidak ada dependencies untuk Kilat (atau package.json tidak bisa diparse)."
-  rm -f "$DEPS_FILE"
-  exit 0
-fi
-
-TOTAL=$(wc -l < "$DEPS_FILE")
-echo "[$APP_NAME] pasang $TOTAL deps ke cache Kilat ($KILAT_CACHE) via npm pack..."
-
-FAIL_COUNT=0
-OK_COUNT=0
-FAILED_SPECS=()   # array "name@ver" untuk package yang gagal di cache Kilat
-while IFS=$'\t' read -r pkg_name pkg_ver; do
-  [ -z "$pkg_name" ] && continue
-  if install_pkg_to_kilat_cache "$pkg_name" "$pkg_ver"; then
-    OK_COUNT=$((OK_COUNT+1))
-  else
-    FAIL_COUNT=$((FAIL_COUNT+1))
-    # Simpan spec untuk npm install ke node_modules lokal
-    if [ -n "$pkg_ver" ]; then
-      # Strip prefix versi
-      local_v="${pkg_ver#^}"; local_v="${local_v#~}"; local_v="${local_v#>=}"
-      local_v="${local_v#<=}"; local_v="${local_v#>}"; local_v="${local_v#<}"
-      local_v="${local_v#v}"; local_v="${local_v#=}"; local_v="$(echo "$local_v" | tr -d ' ')"
-      if [ -n "$local_v" ] && [ "$local_v" != "latest" ] && \
-         ! echo "$local_v" | grep -qE '^(file:|link:|workspace:|git\+|github:|https?:|/|\.)'; then
-        FAILED_SPECS+=("${pkg_name}@${local_v}")
-      else
-        FAILED_SPECS+=("$pkg_name")
-      fi
-    else
-      FAILED_SPECS+=("$pkg_name")
-    fi
-  fi
-done < "$DEPS_FILE"
-
-rm -f "$DEPS_FILE"
-
-echo "[$APP_NAME] ============================================"
-echo "[$APP_NAME] Kilat deps summary: $OK_COUNT OK, $FAIL_COUNT gagal dari $TOTAL total"
-
-# ── Fallback: install package yang gagal ke node_modules/ lokal ──────────────
-# Kenapa ini aman:
-#   Kilat (Goja CommonJS resolver) cek cache ~/.kilat/packages/ DULU,
-#   kalau tidak ketemu lanjut ke algoritma Node resolution standar:
-#   cari node_modules/ di direktori ini dan parent-nya.
-#   Jadi require('pkg-sukses') → cache Kilat (hemat storage),
-#       require('pkg-gagal')  → node_modules/ lokal (tetap jalan).
-if [ "$FAIL_COUNT" -gt 0 ] && [ "${#FAILED_SPECS[@]}" -gt 0 ]; then
-  echo "[$APP_NAME] ↳ install $FAIL_COUNT paket gagal ke node_modules/ lokal (hybrid mode)..."
-  # Bersihkan node_modules lama dulu kalau ada (yang asli, bukan dari zip)
-  if [ -d node_modules ] && [ ! -f node_modules/.kilat-managed ]; then
-    echo "[$APP_NAME]   node_modules/ lama ditemukan, biarkan (mungkin dari node_modules.zip)"
-  fi
-  mkdir -p node_modules
-  touch node_modules/.kilat-managed  # marker: node_modules ini di-manage ensure-kilat-deps
-
-  # Install SATU PER SATU di direktori temporary — kalau install langsung di app
-  # dir, npm akan resolve SEMUA deps di package.json app (termasuk yang invalid),
-  # sehingga install gagal total. Dengan temp dir + package.json minimal yang
-  # hanya berisi paket yang sedang diinstall, install selalu atomic per-paket.
-  INSTALLED=0
-  STILL_FAIL=0
-  NM_TMP="$(mktemp -d)"
-  for spec in "${FAILED_SPECS[@]}"; do
-    p_name="${spec%@*}"
-    [ "$p_name" = "$spec" ] && p_name="$spec"
-    # Skip kalau sudah ada di node_modules app (dari zip / cache lama)
-    if [ -d "node_modules/$p_name" ] && [ -f "node_modules/$p_name/package.json" ]; then
-      echo "[$APP_NAME]   ✓ $p_name sudah ada di node_modules/ (skip)"
-      INSTALLED=$((INSTALLED+1))
-      continue
-    fi
-
-    # Bersihkan temp dir
-    rm -rf "$NM_TMP"/*; mkdir -p "$NM_TMP"
-    # Buat package.json minimal yang hanya berisi spec ini
-    node -e '
-      const fs = require("fs");
-      const spec = process.argv[1];
-      const atIdx = spec.lastIndexOf("@");
-      const name = atIdx > 0 ? spec.slice(0, atIdx) : spec;
-      const ver  = atIdx > 0 ? spec.slice(atIdx + 1) : "latest";
-      const pkg = {
-        name: "kilat-fallback-tmp",
-        version: "0.0.0",
-        private: true,
-        dependencies: { [name]: ver.startsWith("^") || ver.startsWith("~") ? ver : "^" + ver }
-      };
-      fs.writeFileSync(process.argv[2] + "/package.json", JSON.stringify(pkg, null, 2));
-    ' "$spec" "$NM_TMP" 2>/dev/null
-
-    # npm install di temp dir
-    if (cd "$NM_TMP" && npm install --no-audit --no-fund --no-package-lock \
-         --omit=dev --loglevel=error --prefer-offline 2>&1) | \
-         grep -vE '^npm warn|^$' | sed "s/^/[$APP_NAME]   /"; then
-      # Copy hasil ke node_modules app
-      if [ -d "$NM_TMP/node_modules/$p_name" ]; then
-        mkdir -p "node_modules/$p_name"
-        cp -a "$NM_TMP/node_modules/$p_name/." "node_modules/$p_name/" 2>/dev/null || \
-          cp -r "$NM_TMP/node_modules/$p_name/." "node_modules/$p_name/" 2>/dev/null
-        # Copy juga sub-deps-nya ke node_modules app
-        for sub in "$NM_TMP/node_modules/"*; do
-          [ -d "$sub" ] || continue
-          sub_name=$(basename "$sub")
-          [ "$sub_name" = "$p_name" ] && continue
-          [ "$sub_name" = ".package-lock" ] && continue
-          [ -d "node_modules/$sub_name" ] && continue
-          mkdir -p "node_modules/$sub_name"
-          cp -a "$sub/." "node_modules/$sub_name/" 2>/dev/null || \
-            cp -r "$sub/." "node_modules/$sub_name/" 2>/dev/null
-        done
-        echo "[$APP_NAME]   ✓ $p_name → node_modules/ (+ sub-deps)"
-        INSTALLED=$((INSTALLED+1))
-      else
-        echo "[$APP_NAME]   ⚠ $p_name: npm install exit 0 tapi folder tidak ada"
-        STILL_FAIL=$((STILL_FAIL+1))
-      fi
-    else
-      echo "[$APP_NAME]   ⚠ $p_name: npm install gagal (mungkin tidak ada di registry)"
-      STILL_FAIL=$((STILL_FAIL+1))
-    fi
-    # Bersihkan temp dir untuk iterasi berikutnya
-    rm -rf "$NM_TMP"/*
-  done
-  rm -rf "$NM_TMP"
-
-  echo "[$APP_NAME] ============================================"
-  echo "[$APP_NAME] node_modules fallback: $INSTALLED OK, $STILL_FAIL masih gagal dari $FAIL_COUNT"
-
-  # Cleanup npm cache (hemat storage)
-  npm cache clean --force 2>/dev/null || true
-fi
-
-if [ "$FAIL_COUNT" -gt 0 ]; then
-  if [ -n "${INSTALLED:-0}" ] && [ "$INSTALLED" -gt 0 ]; then
-    echo "[$APP_NAME] ℹ hybrid mode: cache Kilat ($OK_COUNT paket) + node_modules/ ($INSTALLED paket fallback)"
-    [ "$STILL_FAIL" -gt 0 ] && \
-      echo "[$APP_NAME] ⚠ $STILL_FAIL paket tidak bisa diinstall sama sekali — app akan error saat require() paket ini"
-  else
-    echo "[$APP_NAME] ⚠ $FAIL_COUNT paket gagal di cache Kilat DAN node_modules fallback"
-    echo "[$APP_NAME]   App akan error saat require() paket-paket ini."
-  fi
-else
-  echo "[$APP_NAME] ✓ semua deps terpasang ke cache Kilat (pure Kilat mode, hemat storage maksimal)."
-fi
-
-# Hitung total storage yang dipakai
-KILAT_SIZE=$(du -sh "$KILAT_CACHE" 2>/dev/null | cut -f1)
-NM_SIZE="(none)"
-[ -d node_modules ] && NM_SIZE=$(du -sh node_modules 2>/dev/null | cut -f1)
-echo "[$APP_NAME] storage: kilat-cache=$KILAT_SIZE, node_modules=$NM_SIZE"
-exit 0
-SCRIPT
-
-# ─── run-kilat-app.sh ─────────────────────────────────────────────────────────
-# Jalankan app Node.js dengan Kilat runtime (binary tunggal Go+Goja, tanpa V8).
-# Dipanggil oleh run-node-app.sh ketika USE_KILAT=true & app opt-in.
-# Aturan opt-in:
-#   - ENV USE_KILAT=true per-app (di-set di run-<app>.sh), ATAU
-#   - package.json memiliki field "kilat": true, ATAU
-#   - nama app tercatat di ENV KILAT_ENABLED_APPS (CSV, mis. "ttt,nexcloud")
-RUN cat > /usr/local/bin/run-kilat-app.sh <<'SCRIPT'
-#!/usr/bin/env bash
-# run-kilat-app.sh — jalankan app Node.js via Kilat runtime (Go+Goja, tanpa V8).
-# Dipanggil oleh run-node-app.sh ketika opt-in Kilat aktif.
-#
-# Aturan opt-in (salah satu):
-#   - ENV USE_KILAT=true per-app, ATAU
-#   - package.json punya field "kilat": true, ATAU
-#   - nama app tercatat di ENV KILAT_ENABLED_APPS (CSV)
-#
-# Env yang dihormati:
-#   KILAT_HOME           — root dir Kilat (default /data/root/.kilat)
-#   KILAT_PACKAGES_DIR   — lokasi cache packages (default $KILAT_HOME/packages)
-set -uo pipefail
-APP_NAME="$1"; APP_DIR="$2"; ENTRY_DEFAULT="${3:-server.js}"
-
-if ! command -v kilat >/dev/null 2>&1; then
-  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js." >&2
-  exit 2
-fi
-
-[ ! -d "$APP_DIR" ] && { echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2; exit 1; }
-cd "$APP_DIR" || { echo "[$APP_NAME] tidak bisa cd ke $APP_DIR" >&2; exit 1; }
-[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada di $APP_DIR" >&2; exit 1; }
-
-# Pastikan env Kilat konsisten dengan cache yang sudah diisi
-export KILAT_HOME="${KILAT_HOME:-/data/root/.kilat}"
-export KILAT_PACKAGES_DIR="${KILAT_PACKAGES_DIR:-$KILAT_HOME/packages}"
-mkdir -p "$KILAT_PACKAGES_DIR"
-
-# ── Pre-flight: pasang deps ke cache Kilat ─────────────────────────────────
-# Pastikan cache terisi SEBELUM `kilat run` — kalau tidak, kilat run langsung
-# error "package tidak tersedia" saat require() pertama.
-echo "[$APP_NAME] pre-flight: pasang deps Kilat..."
-if ! /usr/local/bin/ensure-kilat-deps.sh "$APP_NAME" "$APP_DIR"; then
-  echo "[$APP_NAME] ensure-kilat-deps gagal (kode $?). Tetap lanjut kilat run."
-fi
 
 # ── Resolve entry point ─────────────────────────────────────────────────────
 ENTRY="$ENTRY_DEFAULT"
@@ -1407,27 +1065,83 @@ if [ ! -f "$ENTRY" ]; then
   done
 fi
 if [ ! -f "$ENTRY" ]; then
-  echo "[$APP_NAME] entry point tidak ditemukan (dicari: $ENTRY_DEFAULT, server.js, index.js, app.js, main.js)." >&2
-  exit 1
+  if npm run 2>/dev/null | grep -qE '^\s+start\b'; then
+    exec /usr/local/bin/clear-app-port-env.sh npm start
+  fi
+  echo "[$APP_NAME] entry point tidak ditemukan." >&2; sleep 10; exit 1
 fi
 
-# ── Cek apakah entry point pakai sintaks yang tidak didukung Kilat ───────────
-# Kilat v0.3.0 hanya mendukung CommonJS (require/module.exports).
-# Kalau file pakai ESM (import/export), fallback ke Node.js.
-if grep -qE '^[[:space:]]*import\s+|^[[:space:]]*export\s+(default|const|function|class)\s' "$ENTRY" 2>/dev/null; then
-  echo "[$APP_NAME] $ENTRY memakai ES Modules (import/export). Kilat v0.3.0 belum support ESM → fallback Node.js." >&2
-  exit 2
+echo "[$APP_NAME] start: node $NODE_EXTRA $ENTRY"
+exec /usr/local/bin/clear-app-port-env.sh node $NODE_EXTRA "$ENTRY"
+SCRIPT
+
+# ─── kilat-doctor.sh ──────────────────────────────────────────────────────────
+# Diagnostic helper: cek instalasi Kilat, pnpm, dan storage apps.
+# Jalankan via SSH: kilat-doctor (alias: kd)
+RUN cat > /usr/local/bin/kilat-doctor <<'SCRIPT'
+#!/usr/bin/env bash
+# kilat-doctor — cek instalasi Kilat, pnpm, dan storage apps
+set +e
+C='\033[1;36m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'; N='\033[0m'
+
+printf "${C}═══ Runtime Versions ═══${N}\n"
+command -v node   >/dev/null 2>&1 && printf "  ${G}✓${N} node:   $(node -v)\n"   || printf "  ${R}✗ node tidak ada${N}\n"
+command -v npm    >/dev/null 2>&1 && printf "  ${G}✓${N} npm:    $(npm -v)\n"    || printf "  ${R}✗ npm tidak ada${N}\n"
+command -v pnpm   >/dev/null 2>&1 && printf "  ${G}✓${N} pnpm:   $(pnpm -v)\n"   || printf "  ${Y}⚠ pnpm tidak ada${N}\n"
+command -v kilat  >/dev/null 2>&1 && printf "  ${G}✓${N} kilat:  $(kilat --version 2>/dev/null || echo '?')\n"  || printf "  ${Y}○ kilat tidak ada (opsional, untuk script sederhana)${N}\n"
+
+printf "\n${C}═══ pnpm Global Store ═══${N}\n"
+PNPM_STORE="${PNPM_STORE_DIR:-/data/root/.pnpm-store}"
+if [ -d "$PNPM_STORE" ]; then
+  STORE_PKGS=$(find "$PNPM_STORE" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | wc -l)
+  STORE_SIZE=$(du -sh "$PNPM_STORE" 2>/dev/null | cut -f1)
+  printf "  ${G}✓${N} $PNPM_STORE\n"
+  printf "    $STORE_PKGS package versions, $STORE_SIZE\n"
+else
+  printf "  ${Y}⚠ store belum dibuat${N}\n"
 fi
 
-# Kilat auto-load .env di direktori kerja
-echo "[$APP_NAME] start (Kilat v$(kilat --version 2>/dev/null || echo '?')): kilat run $ENTRY"
-echo "[$APP_NAME] cache: $KILAT_PACKAGES_DIR ($(find "$KILAT_PACKAGES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) paket tercache)"
-if [ -d node_modules ] && [ -f node_modules/.kilat-managed ]; then
-  NM_PKGS=$(find node_modules -mindepth 1 -maxdepth 1 -type d ! -name '.kilat-managed' 2>/dev/null | wc -l)
-  echo "[$APP_NAME] hybrid mode aktif: $NM_PKGS paket di node_modules/ (fallback untuk yang gagal di cache Kilat)"
+printf "\n${C}═══ Kilat Cache (untuk script manual) ═══${N}\n"
+KPD="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
+if [ -d "$KPD" ]; then
+  KPKGS=$(find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+  KSIZE=$(du -sh "$KPD" 2>/dev/null | cut -f1)
+  printf "  ${G}✓${N} $KPD ($KPKGS paket, $KSIZE)\n"
+else
+  printf "  ${Y}○ cache Kosong (belum ada kilat add)${N}\n"
 fi
 
-exec /usr/local/bin/clear-app-port-env.sh kilat run "$ENTRY"
+printf "\n${C}═══ Apps Storage ═══${N}\n"
+TOTAL_NM=0
+TOTAL_APPS=0
+for app_dir in /data/apps/*/; do
+  [ -d "$app_dir" ] || continue
+  app_name=$(basename "$app_dir")
+  [ -f "$app_dir/package.json" ] || continue
+  TOTAL_APPS=$((TOTAL_APPS+1))
+  NM_SIZE="(none)"
+  if [ -d "$app_dir/node_modules" ]; then
+    NM_SIZE=$(du -sh "$app_dir/node_modules" 2>/dev/null | cut -f1)
+    NM_BYTES=$(du -sb "$app_dir/node_modules" 2>/dev/null | cut -f1)
+    TOTAL_NM=$((TOTAL_NM + ${NM_BYTES:-0}))
+  fi
+  HAS_LOCK=""
+  [ -f "$app_dir/pnpm-lock.yaml" ] && HAS_LOCK="pnpm-lock"
+  [ -f "$app_dir/package-lock.json" ] && HAS_LOCK="$HAS_LOCK pkg-lock"
+  [ -f "$app_dir/node_modules.zip" ] && HAS_LOCK="$HAS_LOCK nm.zip"
+  printf "  %-16s node_modules=%-8s [%s]\n" "$app_name" "$NM_SIZE" "$(echo $HAS_LOCK | xargs)"
+done
+if [ "$TOTAL_APPS" -gt 0 ]; then
+  printf "\n  Total node_modules: %s (%s apps)\n" "$(numfmt --to=iec $TOTAL_NM 2>/dev/null || echo '?')" "$TOTAL_APPS"
+  printf "  Total pnpm store:   %s (shared, hardlinked ke apps)\n" "$STORE_SIZE"
+fi
+
+printf "\n${C}═══ Tips ═══${N}\n"
+echo "  • App Node.js (kfai/ttt/nexcloud): otomatis pakai pnpm + strip."
+echo "  • Script sederhana: kilat add <pkg> && kilat run script.js"
+echo "  • Hapus cache pnpm: pnpm store prune"
+echo "  • Hapus cache Kilat: rm -rf $KPD/*"
+echo "  • Re-strip node_modules app: /usr/local/bin/strip-node-modules.sh <app> /data/apps/<app>"
 SCRIPT
 
 # ─── run-kfai-nodejs.sh ───────────────────────────────────────────────────────
@@ -1502,9 +1216,9 @@ RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 set +e
 ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
 ulimit -u 65535   2>/dev/null || true
-mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/root/.kilat/packages /data/tmp
+mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/root/.kilat/packages /data/root/.pnpm-store /data/tmp
 chmod 700 /data/root /data/root/.pm2 /data/root/.npm 2>/dev/null || true
-chmod 755 /data/root/.kilat /data/root/.kilat/packages 2>/dev/null || true
+chmod 755 /data/root/.kilat /data/root/.kilat/packages /data/root/.pnpm-store 2>/dev/null || true
 chmod 1777 /tmp /data/tmp 2>/dev/null || true
 npm config set prefer-offline true --global >/dev/null 2>&1 || true
 npm config set audit false --global         >/dev/null 2>&1 || true
@@ -1566,10 +1280,10 @@ set -euo pipefail
 
 # ── 0. Direktori ───────────────────────────────────────────────────────────
 mkdir -p /data/root /data/ssh /data/apps /data/bin /data/launcher \
-         /data/root/.kilat/packages \
+         /data/root/.kilat/packages /data/root/.pnpm-store \
          /run/sshd /data/root/.pm2 /data/root/.npm /data/tmp
 chmod 700 /data/root /data/ssh
-chmod 755 /data/root/.kilat /data/root/.kilat/packages 2>/dev/null || true
+chmod 755 /data/root/.kilat /data/root/.kilat/packages /data/root/.pnpm-store 2>/dev/null || true
 chmod 1777 /data/tmp /tmp || true
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
@@ -1637,8 +1351,9 @@ echo "  LAUNCHER_MODE=${LAUNCHER_MODE:-adaptive}  |  kstatus"
 echo "  Edit launcher: nano /data/launcher/index.js"
 echo
 node -v; npm -v; cloudflared --version 2>/dev/null; echo
-command -v kilat >/dev/null 2>&1 && kilat --version 2>/dev/null || echo "(kilat tidak terpasang di image ini)"
-echo "  Kilat runtime (hemat storage): set USE_KILAT=true atau \"kilat\":true di package.json"
+command -v pnpm  >/dev/null 2>&1 && pnpm -v  2>/dev/null || echo "(pnpm tidak terpasang)"
+command -v kilat >/dev/null 2>&1 && kilat --version 2>/dev/null || echo "(kilat tidak terpasang — opsional untuk script sederhana)"
+echo "  Storage: pnpm global store + strip node_modules (auto). Kilat: manual `kilat run script.js`"
 echo
 BASHRC
 
@@ -1720,10 +1435,9 @@ RUN chmod +x \
       /usr/local/bin/bootstrap-apps.sh \
       /usr/local/bin/clear-app-port-env.sh \
       /usr/local/bin/upgrade-langchain-packages.sh \
+      /usr/local/bin/strip-node-modules.sh \
       /usr/local/bin/ensure-node-app-deps.sh \
-      /usr/local/bin/ensure-kilat-deps.sh \
       /usr/local/bin/run-node-app.sh \
-      /usr/local/bin/run-kilat-app.sh \
       /usr/local/bin/kilat-doctor \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
