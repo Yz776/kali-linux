@@ -209,7 +209,10 @@ RUN set -eux; \
 #   events, child_process. Jadi app kfai/ttt/nexcloud WAJIB pakai Node.js + pnpm.
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN set -eux; \
-    npm install -g pnpm@latest --no-audit --no-fund --loglevel=error; \
+    # Pin ke pnpm@9 (bukan pnpm@latest) — pnpm v10+ butuh Node.js v22.13+ untuk
+    # module node:sqlite built-in, sedangkan image ini pakai Node.js 20.
+    # pnpm 9.x adalah LTS terakhir yang support Node.js 18/20/22 secara penuh.
+    npm install -g pnpm@9 --no-audit --no-fund --loglevel=error; \
     pnpm config set store-dir /data/root/.pnpm-store --global; \
     pnpm config set prefer-offline true --global; \
     pnpm config set reporter silent --global; \
