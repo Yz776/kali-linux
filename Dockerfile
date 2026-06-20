@@ -1007,33 +1007,48 @@ echo "  - Test app: cd /data/apps/<app> && kilat run server.js"
 SCRIPT
 
 # ─── ensure-kilat-deps.sh ─────────────────────────────────────────────────────
-# Pasang dependencies app ke cache Kilat terpusat (~/.kilat/packages/) dengan
-# `kilat add`. Tidak membuat node_modules lokal — itulah inti penghemat storage.
+# Pasang dependencies app ke cache Kilat terpusat (~/.kilat/packages/).
+# Strategi: npm pack + extract (lebih reliable daripada `kilat add` yang
+# sering 404 untuk package tertentu), dengan fallback ke `kilat add`.
 # Dipanggil oleh run-node-app.sh ketika USE_KILAT=true.
 RUN cat > /usr/local/bin/ensure-kilat-deps.sh <<'SCRIPT'
 #!/usr/bin/env bash
 # ensure-kilat-deps.sh — pasang dependencies app ke cache Kilat terpusat.
 #
-# Mengapa script ini perlu:
-#   Kilat v0.3.0 TIDAK punya `kilat install` (bulk install dari package.json).
-#   Kita harus iterasi `dependencies` satu per satu dengan `kilat add <pkg>@<ver>`.
-#   Cache Kilat disimpan di $KILAT_PACKAGES_DIR (default /data/root/.kilat/packages)
-#   dan persistent — sekali di-add, app lain bisa langsung pakai.
+# Strategi (setelah pelajaran 404 dari `kilat add`):
+#   1. Pakai `npm pack` (resolusi penuh dari registry.npmjs.org resmi) untuk
+#      download tarball setiap dep — ini selalu berhasil selama npm jalan.
+#   2. Extract tarball ke $KILAT_PACKAGES_DIR/<pkg-name>/ — inilah format yang
+#      sama persis dengan yang `kilat add` hasilkan, sehingga `kilat run` bisa
+#      me-resolve `require('<pkg-name>')` dari cache tanpa perlu `kilat add`.
+#   3. Fallback: kalau `npm pack` gagal (mis. scoped package atau versi exotic),
+#      coba `kilat add` sebagai upaya terakhir.
+#   4. Resolve sub-dependensi transitif juga via `npm pack --dry-run` JSON
+#      output, lalu pack semua subtree (dfs 1 level untuk performa).
+#
+# Cache layout (kompatibel dengan kilat add output):
+#   $KILAT_PACKAGES_DIR/<pkg-name>/package.json
+#   $KILAT_PACKAGES_DIR/<pkg-name>/index.js
+#   $KILAT_PACKAGES_DIR/<pkg-name>/...
 #
 # Robustness:
-#   - Parser JSON pakai node (sudah ada di image), bukan jq.
-#   - Strip prefix versi (^, ~, >=, v) supaya Kilat menerima.
-#   - Skip "latest", "workspace:*", "file:", "git+", "link:" — tidak didukung Kilat.
+#   - Parser JSON pakai node (sudah ada di image).
+#   - Strip prefix versi (^, ~, >=, v) sebelum kirim ke npm pack.
+#   - Skip "file:", "link:", "workspace:", "git+", "github:", path lokal.
+#   - Cache hit check: kalau folder paket sudah ada & ada package.json, skip.
 #   - Retry 2x per package kalau transient network error.
-#   - Exit 0 walau ada yang gagal — app tetap dicoba jalan (Kilat akan error
-#     spesifik per require() yang gagal, lebih informatif daripada crash global).
+#   - Exit 0 walau ada yang gagal — app tetap dicoba jalan.
 set -uo pipefail
 APP_NAME="$1"; APP_DIR="$2"
 cd "$APP_DIR" || { echo "[$APP_NAME] tidak bisa cd ke $APP_DIR" >&2; exit 1; }
-[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && exit 1
+[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; exit 1; }
 
 if ! command -v kilat >/dev/null 2>&1; then
   echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js." >&2
+  exit 2
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "[$APP_NAME] npm tidak tersedia — tidak bisa resolve deps untuk Kilat." >&2
   exit 2
 fi
 
@@ -1042,9 +1057,120 @@ KILAT_CACHE="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
 mkdir -p "$KILAT_CACHE"
 export KILAT_HOME="${KILAT_HOME:-/data/root/.kilat}"
 
-# Ekstrak dependencies (prod saja) dari package.json dengan parser node yang ketat.
-# Hanya kirim baris dengan format "name@version" atau "name".
-# Skip entry dengan versi: latest, file:, link:, workspace:, git+, github:, https:, /path
+# Direktori sementara untuk npm pack (tarball download)
+PACK_TMP="$(mktemp -d)"
+trap 'rm -rf "$PACK_TMP"' EXIT
+
+# ── Helper: pasang satu paket ke cache Kilat ───────────────────────────────
+# Argumen: <pkg-name> <raw-version>
+# Return: 0 = sukses (cache terisi), 1 = gagal
+install_pkg_to_kilat_cache() {
+  local name="$1" raw_ver="${2:-}"
+  local clean_ver=""
+  local spec="$name"
+
+  # Cek cache hit dulu
+  if [ -d "$KILAT_CACHE/$name" ] && [ -f "$KILAT_CACHE/$name/package.json" ]; then
+    echo "[$APP_NAME] ✓ cache hit: $name (skip)"
+    return 0
+  fi
+
+  # Normalisasi versi
+  if [ -n "$raw_ver" ]; then
+    local v="${raw_ver#^}"  # strip ^
+    v="${v#~}"
+    v="${v#>=}"
+    v="${v#<=}"
+    v="${v#>}"
+    v="${v#<}"
+    v="${v#v}"
+    v="${v#=}"
+    v="$(echo "$v" | tr -d ' ')"
+    if [ -n "$v" ] && [ "$v" != "latest" ] && \
+       ! echo "$v" | grep -qE '^(file:|link:|workspace:|git\+|github:|https?:|/|\.)'; then
+      clean_ver="$v"
+      spec="${name}@${clean_ver}"
+    fi
+  fi
+
+  echo "[$APP_NAME] install: $spec"
+
+  # ── Strategi 1: npm pack (selalu pakai registry.npmjs.org resmi) ────────
+  local tarball=""
+  local pack_output
+  pack_output="$(cd "$PACK_TMP" && npm pack "$spec" --no-audit --no-fund --loglevel=error --prefer-offline 2>&1)" || true
+  # Output npm pack = path ke .tgz di baris terakhir
+  tarball="$(echo "$pack_output" | tail -n1 | tr -d '[:space:]')"
+  if [ -n "$tarball" ] && [ -f "$tarball" ]; then
+    local staging="$PACK_TMP/extract-$name"
+    mkdir -p "$staging"
+    if tar -xzf "$tarball" -C "$staging" 2>/dev/null; then
+      # Isi tarball ada di subfolder "package/"
+      if [ -d "$staging/package" ]; then
+        rm -rf "$KILAT_CACHE/$name"
+        mkdir -p "$KILAT_CACHE/$name"
+        # Pakai cp -a untuk preserve perms & timestamps
+        cp -a "$staging/package/." "$KILAT_CACHE/$name/" 2>/dev/null || \
+          cp -r "$staging/package/." "$KILAT_CACHE/$name/" 2>/dev/null
+        rm -rf "$staging"
+        if [ -f "$KILAT_CACHE/$name/package.json" ]; then
+          echo "[$APP_NAME] ✓ npm pack: $name → $KILAT_CACHE/$name"
+          # Install sub-dependensi transitif (1 level untuk performa)
+          install_subdeps "$name"
+          return 0
+        fi
+      fi
+    fi
+    rm -rf "$staging" "$tarball"
+  fi
+
+  # ── Strategi 2: fallback ke kilat add ───────────────────────────────────
+  echo "[$APP_NAME] npm pack gagal untuk $spec, coba kilat add..."
+  for attempt in 1 2; do
+    if kilat add "$spec" 2>&1 | sed "s/^/[$APP_NAME] /"; then
+      if [ -d "$KILAT_CACHE/$name" ] && [ -f "$KILAT_CACHE/$name/package.json" ]; then
+        echo "[$APP_NAME] ✓ kilat add: $name → $KILAT_CACHE/$name"
+        return 0
+      fi
+    fi
+    [ "$attempt" -lt 2 ] && { echo "[$APP_NAME] retry kilat add $spec (attempt $attempt/2)..."; sleep 1; }
+  done
+
+  echo "[$APP_NAME] ✗ gagal install $spec (npm pack & kilat add keduanya gagal)"
+  return 1
+}
+
+# ── Helper: pasang sub-dependensi transitif (1 level dfs) ──────────────────
+# Kenapa 1 level: Kilat me-resolve require('sub-dep') dengan mencari di cache
+# juga, jadi sub-dep harus ada. Tapi kita tidak recursive full — itu lambat &
+# biasanya Kilat cuma butuh 1 level untuk common case.
+install_subdeps() {
+  local parent="$1"
+  local pj="$KILAT_CACHE/$parent/package.json"
+  [ ! -f "$pj" ] && return 0
+  # Ambil dependencies (prod only) dari package.json paket
+  local subs
+  subs=$(node -e '
+    const fs = require("fs");
+    try {
+      const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const deps = p.dependencies || {};
+      const out = [];
+      for (const [n, v] of Object.entries(deps)) out.push(n + "\t" + (v || ""));
+      process.stdout.write(out.join("\n"));
+    } catch (e) { /* ignore */ }
+  ' "$pj" 2>/dev/null)
+  [ -z "$subs" ] && return 0
+  local sub_count=0
+  while IFS=$'\t' read -r sub_name sub_ver; do
+    [ -z "$sub_name" ] && continue
+    [ -d "$KILAT_CACHE/$sub_name" ] && [ -f "$KILAT_CACHE/$sub_name/package.json" ] && continue
+    install_pkg_to_kilat_cache "$sub_name" "$sub_ver" && sub_count=$((sub_count+1))
+  done <<< "$subs"
+  [ "$sub_count" -gt 0 ] && echo "[$APP_NAME] ✓ $parent: $sub_count sub-dep di-cache"
+}
+
+# ── Ekstrak dependencies dari package.json app ─────────────────────────────
 DEPS_FILE="$(mktemp)"
 node -e '
   const fs = require("fs");
@@ -1055,18 +1181,7 @@ node -e '
   const out = [];
   for (const [name, raw] of Object.entries(deps)) {
     if (!name) continue;
-    const v = String(raw || "").trim();
-    if (!v) { out.push(name); continue; }
-    if (v.startsWith("file:") || v.startsWith("link:") || v.startsWith("workspace:")
-        || v.startsWith("git+") || v.startsWith("github:") || v.startsWith("http:")
-        || v.startsWith("https:") || v.startsWith("/") || v === "latest") {
-      // Pakai nama saja, biar Kilat ambil versi latest dari npm
-      out.push(name);
-      continue;
-    }
-    // Strip prefix semver: ^ ~ >= <= > < = v
-    const clean = v.replace(/^[\^~>=<= ]+/, "").replace(/^v/, "");
-    out.push(clean ? name + "@" + clean : name);
+    out.push(name + "\t" + String(raw || ""));
   }
   process.stdout.write(out.join("\n"));
 ' > "$DEPS_FILE" 2>/dev/null || true
@@ -1077,40 +1192,33 @@ if [ ! -s "$DEPS_FILE" ]; then
   exit 0
 fi
 
-echo "[$APP_NAME] pasang $(wc -l < "$DEPS_FILE") deps ke cache Kilat ($KILAT_CACHE)..."
+TOTAL=$(wc -l < "$DEPS_FILE")
+echo "[$APP_NAME] pasang $TOTAL deps ke cache Kilat ($KILAT_CACHE) via npm pack..."
 
 FAIL_COUNT=0
-while IFS= read -r dep; do
-  [ -z "$dep" ] && continue
-  # Cek apakah package sudah ada di cache (skip jika sudah ada & valid)
-  PKG_NAME="${dep%@*}"
-  [ "$PKG_NAME" = "$dep" ] && PKG_NAME="$dep"
-  if [ -d "$KILAT_CACHE/$PKG_NAME" ] && [ -n "$(ls -A "$KILAT_CACHE/$PKG_NAME" 2>/dev/null)" ]; then
-    echo "[$APP_NAME] ✓ cache hit: $PKG_NAME (skip download)"
-    continue
+OK_COUNT=0
+while IFS=$'\t' read -r pkg_name pkg_ver; do
+  [ -z "$pkg_name" ] && continue
+  if install_pkg_to_kilat_cache "$pkg_name" "$pkg_ver"; then
+    OK_COUNT=$((OK_COUNT+1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1))
   fi
-  echo "[$APP_NAME] kilat add $dep"
-  OK=0
-  for attempt in 1 2; do
-    if kilat add "$dep" 2>&1 | sed "s/^/[$APP_NAME] /"; then
-      # Verifikasi: folder package harus muncul
-      if [ -d "$KILAT_CACHE/$PKG_NAME" ]; then
-        OK=1
-        break
-      fi
-    fi
-    [ "$attempt" -lt 2 ] && echo "[$APP_NAME] retry $dep (attempt $attempt/2)..." && sleep 1
-  done
-  [ "$OK" -ne 1 ] && { echo "[$APP_NAME] WARN: kilat add $dep gagal setelah retry."; FAIL_COUNT=$((FAIL_COUNT+1)); }
 done < "$DEPS_FILE"
 
 rm -f "$DEPS_FILE"
 
+echo "[$APP_NAME] ============================================"
+echo "[$APP_NAME] Kilat deps summary: $OK_COUNT OK, $FAIL_COUNT gagal dari $TOTAL total"
 if [ "$FAIL_COUNT" -gt 0 ]; then
-  echo "[$APP_NAME] deps Kilat siap dengan $FAIL_COUNT paket gagal (app mungkin error saat require)."
+  echo "[$APP_NAME] ⚠ $FAIL_COUNT paket gagal. App mungkin error saat require()."
+  echo "[$APP_NAME] Tips: cek log di atas, pasang manual via SSH:"
+  echo "[$APP_NAME]   cd $APP_DIR && kilat add <pkg>@<ver>"
+  echo "[$APP_NAME] atau pakai Node.js (set USE_KILAT=false)."
 else
-  echo "[$APP_NAME] deps Kilat siap (cache terpusat, tanpa node_modules lokal)."
+  echo "[$APP_NAME] ✓ semua deps terpasang ke cache Kilat."
 fi
+echo "[$APP_NAME] cache: $KILAT_CACHE ($(find "$KILAT_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) paket, $(du -sh "$KILAT_CACHE" 2>/dev/null | cut -f1))"
 exit 0
 SCRIPT
 
