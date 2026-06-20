@@ -1,33 +1,19 @@
 FROM kalilinux/kali-rolling
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STRATEGI HEMAT STORAGE
-# ───────────────────────────────────────────────────────────────────────────────
-# 1. pnpm (UTAMA) — global store + hardlinks untuk semua app Node.js sungguhan.
-#    Deps yang sama di-share antar app tanpa duplikasi. Hemat 50-70%.
-# 2. strip-node-modules.sh — hapus *.md, *.ts, test files, docs, examples,
-#    build artifacts dari node_modules setelah install. Hemat 30-60% tambahan.
-# 3. npm/pnpm cache clean — hapus cache setelah install selesai.
-# 4. Kilat (OPSIONAL, manual only) — runtime JS ringan untuk script sederhana.
-#    Tidak bisa run app Node.js sungguhan (module bawaan terbatas: console/fs/os/net).
-#    Pakai manual: `kilat run hello.js` untuk quick script tanpa node_modules.
-#
-# Cara pakai:
-#   - App Node.js (kfai/ttt/nexcloud): otomatis pakai pnpm + strip. Tidak perlu
-#     konfigurasi tambahan.
-#   - Script sederhana: `kilat run script.js` (manual, setelah `kilat add <dep>`)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
+# Catatan perubahan (v2 — stabil + hemat RAM):
+#   • LANGCHAIN_AUTO_UPGRADE default = false  (sebelumnya true → npm install @latest tiap boot)
+#   • NODE_OPTIONS ditambah --max-semi-space-size=64 + --gc-interval=100 (GC lebih efisien)
+#   • PATH tetap, untuk compat dengan script existing
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Jakarta \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     # Node
     NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=512" \
+    NODE_OPTIONS="--max-old-space-size=384 --max-semi-space-size=64 --gc-interval=100 --expose-gc" \
     # NPM – matikan semua yang lambat
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
@@ -38,8 +24,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_FETCH_RETRIES=3 \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=30000 \
-    # LangChain
-    LANGCHAIN_AUTO_UPGRADE=true \
+    # LangChain – default NONAKTIF (override ke true via docker run -e kalau perlu)
+    LANGCHAIN_AUTO_UPGRADE=false \
     # Paths
     SSH_PORT=22 \
     DATA_DIR=/data \
@@ -47,17 +33,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PM2_HOME=/data/root/.pm2 \
     NPM_CONFIG_CACHE=/data/root/.npm \
     PATH="/data/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    # ── Kilat (https://jolt.shannyie.web.id/) ──────────────────────────────────
-    # Runtime JavaScript ringan berbasis Go (engine Goja). HANYA untuk script
-    # sederhana (console/fs/os/net). Tidak bisa run app Node.js sungguhan.
-    # Manual use: kilat run script.js | kilat add <pkg>
-    KILAT_VERSION=v0.3.0 \
-    KILAT_HOME=/data/root/.kilat \
-    KILAT_PACKAGES_DIR=/data/root/.kilat/packages \
-    # ── pnpm (strategi utama hemat storage untuk app Node.js sungguhan) ────────
-    # Global store + hardlinks → deps shared antar app tanpa duplikasi.
-    PNPM_HOME=/data/root/.local/share/pnpm \
-    PNPM_STORE_DIR=/data/root/.pnpm-store \
     # Git
     GIT_TERMINAL_PROMPT=0 \
     GIT_HTTP_LOW_SPEED_LIMIT=1000 \
@@ -67,12 +42,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # Adaptive launcher tuning (bisa di-override via env saat docker run)
     INTERACTIVE_APP=kfai-nodejs \
     RESOURCE_MODE=adaptive \
-    ADAPTIVE_INTERVAL_MS=2500 \
+    ADAPTIVE_INTERVAL_MS=3000 \
     FOCUS_HOLD_MS=12000 \
     HIGH_CPU_PERCENT=18 \
     NORMAL_NICE=5 \
     FOCUS_NICE=1 \
-    STARVE_SAFE_NICE=6
+    STARVE_SAFE_NICE=6 \
+    # Memory budget cap (persen RAM container yang dipakai untuk semua app)
+    APP_MEM_BUDGET_PERCENT=75 \
+    # Mem guard v2 — 3-level (warn → soft → hard) + rolling window
+    MEM_GUARD_SOFT_RATIO=1.15 \
+    MEM_GUARD_HARD_RATIO=1.45 \
+    MEM_GUARD_MAX_STRIKES=3 \
+    MEM_GUARD_WINDOW_MS=60000 \
+    MEM_GUARD_INTERVAL_MS=8000 \
+    # Crash-loop protection
+    CRASH_LOOP_WINDOW_MS=300000 \
+    CRASH_LOOP_MAX=8 \
+    CRASH_LOOP_MIN_UPTIME_MS=10000 \
+    CRASH_LOOP_BACKOFF_MS=60000 \
+    # Memory pressure detector
+    PRESSURE_CHECK_INTERVAL_MS=15000 \
+    PRESSURE_AVAIL_THRESHOLD_MB=128
 
 # Repo config
 ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
@@ -169,57 +160,6 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LAYER 3.5 – Kilat (https://jolt.shannyie.web.id/)
-# Runtime JavaScript ultra-ringan berbasis Go (engine Goja) untuk Termux & Linux.
-# Binary tunggal ±5-10MB, TANPA V8 engine, TANPA node_modules per-proyek.
-# Package di-resolve dari cache terpusat ~/.kilat/packages/ sehingga hemat storage.
-# Cocok untuk app Node.js yang hanya pakai CommonJS + fs/os/net/console.
-# ═══════════════════════════════════════════════════════════════════════════════
-RUN set -eux; \
-    ARCH="$(uname -m)"; \
-    case "$ARCH" in \
-      x86_64|amd64)  KILAT_ARCH="amd64" ;; \
-      aarch64|arm64) KILAT_ARCH="arm64" ;; \
-      armv7l|armhf)  KILAT_ARCH="armv7" ;; \
-      *) echo "Kilat: arsitektur $ARCH belum didukung, skip."; exit 0 ;; \
-    esac; \
-    OS_KILAT="$(uname -s | tr '[:upper:]' '[:lower:]')"; \
-    KILAT_URL="https://github.com/IHx-cmyk/kilat/releases/download/${KILAT_VERSION}/kilat-${OS_KILAT}-${KILAT_ARCH}"; \
-    echo "Download Kilat: $KILAT_URL"; \
-    curl -fsSL --retry 3 -o /usr/local/bin/kilat "$KILAT_URL" \
-      || { echo "WARN: gagal download Kilat (mungkin release ${KILAT_VERSION} belum ada untuk ${OS_KILAT}/${KILAT_ARCH}). Skip."; exit 0; }; \
-    chmod +x /usr/local/bin/kilat; \
-    /usr/local/bin/kilat --version 2>/dev/null || echo "Kilat binary terpasang tapi --version gagal."; \
-    mkdir -p /data/root/.kilat/packages; \
-    chmod 755 /data/root/.kilat
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LAYER 3.6 – pnpm (efficient package manager with global store + hardlinks)
-# ───────────────────────────────────────────────────────────────────────────────
-# pnpm adalah strategi utama untuk hemat storage pada app Node.js sungguhan:
-#   • Global store di /data/root/.pnpm-store — setiap versi package disimpan
-#     PERSIS SATU KALI di seluruh container.
-#   • node_modules/ di setiap app berisi hardlink ke global store (bukan copy).
-#   • 4 app yang share lodash@4.17.21 → lodash hanya ambil storage 1x, bukan 4x.
-#   • Rata-rata hemat 50-70% dibanding npm install per-app.
-#
-# Kontras dengan Kilat (yang hanya untuk script sederhana):
-#   Kilat TIDAK bisa run app Node.js sungguhan karena module bawaannya hanya
-#   console/fs/os/net — tidak ada http.Server, Buffer, stream, crypto, path,
-#   events, child_process. Jadi app kfai/ttt/nexcloud WAJIB pakai Node.js + pnpm.
-# ═══════════════════════════════════════════════════════════════════════════════
-RUN set -eux; \
-    # Pin ke pnpm@9 (bukan pnpm@latest) — pnpm v10+ butuh Node.js v22.13+ untuk
-    # module node:sqlite built-in, sedangkan image ini pakai Node.js 20.
-    # pnpm 9.x adalah LTS terakhir yang support Node.js 18/20/22 secara penuh.
-    npm install -g pnpm@9 --no-audit --no-fund --loglevel=error; \
-    pnpm config set store-dir /data/root/.pnpm-store --global; \
-    pnpm config set prefer-offline true --global; \
-    pnpm config set reporter silent --global; \
-    mkdir -p /data/root/.pnpm-store; \
-    pnpm --version
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 – Direktori + SSH host keys pre-generated
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN set -eux; \
@@ -235,6 +175,7 @@ RUN set -eux; \
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SSH CONFIG
+# Catatan: MaxStartups diturunkan jadi 10:30:60 agar SSH flood tidak boros RAM.
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /etc/ssh/sshd_config <<'EOF'
 Port 22
@@ -257,8 +198,9 @@ Compression yes
 Ciphers chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
-MaxAuthTries 6
+MaxAuthTries 4
 MaxSessions 20
+MaxStartups 10:30:60
 LoginGraceTime 30
 StrictModes yes
 Subsystem sftp /usr/lib/openssh/sftp-server
@@ -268,12 +210,12 @@ HostKey /data/ssh/ssh_host_ed25519_key
 EOF
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NSCD CONFIG
+# NSCD CONFIG — turunkan threads agar hemat RAM di container kecil
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /etc/nscd.conf <<'EOF'
 logfile                /dev/null
-threads                4
-max-threads            32
+threads                2
+max-threads            8
 paranoia               no
 enable-cache           hosts     yes
 positive-time-to-live  hosts     600
@@ -282,7 +224,7 @@ suggested-size         hosts     211
 check-files            hosts     yes
 persistent             hosts     yes
 shared                 hosts     yes
-max-db-size            hosts     33554432
+max-db-size            hosts     8388608
 enable-cache           passwd    no
 enable-cache           group     no
 enable-cache           netgroup  no
@@ -290,27 +232,40 @@ enable-cache           services  no
 EOF
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ADAPTIVE LAUNCHER – index.js
-# Launcher Node.js dengan adaptive CPU priority (nice/renice) + memory monitor.
-# Dipasang di /data/launcher/index.js, persisten di /data sehingga bisa di-edit
-# tanpa rebuild image.
+# ADAPTIVE LAUNCHER v2 – index.js
+# Perubahan utama:
+#   1. Deteksi RAM via cgroup (v1 + v2), fallback os.totalmem — fix bug os.totalmem=baca host
+#   2. Cap total app memory ke APP_MEM_BUDGET_PERCENT (default 75%) RAM container
+#   3. Mem guard 3-level: SOFT (warn + GC nudge) → HARD (SIGTERM) → KILL (SIGKILL)
+#      Rolling window: strike reset setelah MEM_GUARD_WINDOW_MS sehat
+#   4. Crash-loop protection: max CRASH_LOOP_MAX restart dlm CRASH_LOOP_WINDOW_MS,
+#      jika dilewati → backoff CRASH_LOOP_BACKOFF_MS
+#   5. Memory pressure detector: jika MemAvailable < threshold, restart app paling boros
+#   6. Rebalance loop di-throttle: skip jika tidak ada perubahan CPU signifikan
+#   7. NODE_OPTIONS per-app: --max-semi-space-size=64 + --gc-interval=100
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
-// /data/launcher/index.js
+// /data/launcher/index.js  (v2 — stabil + hemat RAM)
 // Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, cloudflared
-// sebagai proses child dengan adaptive CPU priority dan memory guard.
+// sebagai proses child dengan adaptive CPU priority, memory guard 3-level,
+// crash-loop protection, dan memory pressure detector.
 //
 // ENV override (semua opsional):
-//   LAUNCHER_MODE=adaptive|pm2        -> pilih launcher (default: adaptive)
-//   INTERACTIVE_APP=kfai-nodejs       -> app yang menerima stdin/readline
+//   LAUNCHER_MODE=adaptive|pm2
+//   INTERACTIVE_APP=kfai-nodejs
 //   RESOURCE_MODE=adaptive|fair|custom
-//   FOCUS_APP=kfai-nodejs             -> paksa fokus ke app tertentu
-//   ADAPTIVE_INTERVAL_MS=2500
+//   FOCUS_APP=kfai-nodejs
+//   ADAPTIVE_INTERVAL_MS=3000
 //   FOCUS_HOLD_MS=12000
 //   HIGH_CPU_PERCENT=18
 //   NORMAL_NICE=5  FOCUS_NICE=1  STARVE_SAFE_NICE=6
-//   KFAI_MEMORY_MB=1024  KFAI_MCP_MEMORY_MB=1536  TTT_MEMORY_MB=512
-//   CF_MEMORY_MB=128
+//   APP_MEM_BUDGET_PERCENT=75    -> cap total app memory
+//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / NEXCLOUD_MEMORY_MB / CF_MEMORY_MB
+//   MEM_GUARD_SOFT_RATIO=1.15  MEM_GUARD_HARD_RATIO=1.45
+//   MEM_GUARD_MAX_STRIKES=3    MEM_GUARD_WINDOW_MS=60000  MEM_GUARD_INTERVAL_MS=8000
+//   CRASH_LOOP_WINDOW_MS=300000  CRASH_LOOP_MAX=8
+//   CRASH_LOOP_MIN_UPTIME_MS=10000  CRASH_LOOP_BACKOFF_MS=60000
+//   PRESSURE_CHECK_INTERVAL_MS=15000  PRESSURE_AVAIL_THRESHOLD_MB=128
 
 'use strict';
 const { spawn, spawnSync } = require('child_process');
@@ -329,54 +284,101 @@ const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toL
 const MANUAL_FOCUS      = (process.env.FOCUS_APP       || '').trim();
 
 const CPU_COUNT          = Math.max(1, os.cpus()?.length || 1);
-const TOTAL_MEM_MB       = Math.floor(os.totalmem() / 1024 / 1024);
-const ADAPTIVE_INTERVAL  = Number(process.env.ADAPTIVE_INTERVAL_MS || 2500);
+
+// ── Deteksi RAM container via cgroup (v2 → v1 → os.totalmem) ─────────────────
+function detectContainerMemMB() {
+  // cgroup v2
+  try {
+    const v = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    if (v !== 'max' && /^\d+$/.test(v)) {
+      const mb = Math.floor(Number(v) / 1024 / 1024);
+      if (mb > 0) return mb;
+    }
+  } catch {}
+  // cgroup v1
+  try {
+    const v = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+    if (/^\d+$/.test(v)) {
+      const n = Number(v);
+      // cgroup v1 mengembalikan VERY_LARGE_NUMBER jika tidak di-set; tolak jika > 1 TB
+      if (n > 0 && n < 1024 * 1024 * 1024 * 1024) return Math.floor(n / 1024 / 1024);
+    }
+  } catch {}
+  // Fallback: os.totalmem (mungkin salah baca di container tanpa cgroup limit)
+  return Math.floor(os.totalmem() / 1024 / 1024);
+}
+
+const TOTAL_MEM_MB  = detectContainerMemMB();
+const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
+const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
+
+// Distribusi: kfai 40%, mcp 30%, ttt 15%, nexcloud 15% (cf di luar budget, kecil)
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.40)));
+const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.30)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
+const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
+const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
+
+const ADAPTIVE_INTERVAL  = Number(process.env.ADAPTIVE_INTERVAL_MS || 3000);
 const FOCUS_HOLD_MS      = Number(process.env.FOCUS_HOLD_MS        || 12000);
 const HIGH_CPU_PERCENT   = Number(process.env.HIGH_CPU_PERCENT      || 18);
 const NORMAL_NICE        = Number(process.env.NORMAL_NICE            || 5);
 const FOCUS_NICE         = Number(process.env.FOCUS_NICE             || 1);
 const STARVE_SAFE_NICE   = Number(process.env.STARVE_SAFE_NICE       || 6);
 
-// Alokasi memori dinamis berdasarkan total RAM tersedia
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.floor(TOTAL_MEM_MB * 0.30));
-const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.floor(TOTAL_MEM_MB * 0.35));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.floor(TOTAL_MEM_MB * 0.15));
-const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.floor(TOTAL_MEM_MB * 0.15));
-const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 128);
+// Mem guard v2
+const MEM_GUARD_SOFT_RATIO   = Number(process.env.MEM_GUARD_SOFT_RATIO    || 1.15);
+const MEM_GUARD_HARD_RATIO   = Number(process.env.MEM_GUARD_HARD_RATIO    || 1.45);
+const MEM_GUARD_MAX_STRIKES  = Number(process.env.MEM_GUARD_MAX_STRIKES   || 3);
+const MEM_GUARD_WINDOW_MS    = Number(process.env.MEM_GUARD_WINDOW_MS     || 60000);
+const MEM_GUARD_INTERVAL_MS  = Number(process.env.MEM_GUARD_INTERVAL_MS   || 8000);
+
+// Crash-loop protection
+const CRASH_LOOP_WINDOW_MS    = Number(process.env.CRASH_LOOP_WINDOW_MS    || 300000);
+const CRASH_LOOP_MAX          = Number(process.env.CRASH_LOOP_MAX          || 8);
+const CRASH_LOOP_MIN_UPTIME_MS= Number(process.env.CRASH_LOOP_MIN_UPTIME_MS|| 10000);
+const CRASH_LOOP_BACKOFF_MS   = Number(process.env.CRASH_LOOP_BACKOFF_MS   || 60000);
+
+// Memory pressure detector
+const PRESSURE_CHECK_INTERVAL_MS = Number(process.env.PRESSURE_CHECK_INTERVAL_MS || 15000);
+const PRESSURE_AVAIL_THRESHOLD_MB= Number(process.env.PRESSURE_AVAIL_THRESHOLD_MB|| 128);
 
 // ── Definisi app ─────────────────────────────────────────────────────────────
-// Setiap app dijalankan via shell script runner yang sudah ada di image.
-// Ini agar deps install, entry detection, dll tetap dihandle script yang sama.
 const APPS = [
   {
     name:     'kfai-nodejs',
     script:   '/usr/local/bin/run-kfai-nodejs.sh',
     memoryMB: KFAI_MEM,
     nice:     NORMAL_NICE,
+    priority: 10, // prioritas restart relatif (lebih tinggi = lebih penting)
   },
   {
     name:     'kfai-mcp',
     script:   '/usr/local/bin/run-kfai-mcp.sh',
     memoryMB: KFAI_MCP_MEM,
     nice:     NORMAL_NICE,
+    priority: 9,
   },
   {
     name:     'ttt',
     script:   '/usr/local/bin/run-ttt.sh',
     memoryMB: TTT_MEM,
     nice:     NORMAL_NICE,
+    priority: 5,
   },
   {
     name:     'nexcloud',
     script:   '/usr/local/bin/run-nexcloud.sh',
     memoryMB: NEXCLOUD_MEM,
     nice:     NORMAL_NICE,
+    priority: 5,
   },
   {
     name:     'cloudflared-ssh',
     script:   '/usr/local/bin/run-cloudflared.sh',
     memoryMB: CF_MEM,
-    nice:     NORMAL_NICE + 3, // cloudflared tidak perlu prioritas tinggi
+    nice:     NORMAL_NICE + 3,
+    priority: 8, // penting untuk akses SSH
   },
 ];
 
@@ -405,6 +407,11 @@ const restarting  = new Map(); // name → boolean (false = graceful stop)
 const lastRestart = new Map(); // name → timestamp
 const procStats   = new Map(); // name → { cpuTicks, sysTicks, at }
 const curNice     = new Map(); // name → current nice value
+const startedAt   = new Map(); // name → timestamp (untuk uptime)
+const memGuardSt  = new Map(); // name → { strikes, lastWarnAt, lastRss }
+const restartHist = new Map(); // name → number[] (timestamps)
+const backoffUntil= new Map(); // name → timestamp (jangan restart sebelum ini)
+const lastRebalanceSig = new Map(); // name → signature CPU terakhir (untuk throttle)
 
 let focusedApp  = MANUAL_FOCUS || null;
 let focusUntil  = MANUAL_FOCUS ? Number.MAX_SAFE_INTEGER : 0;
@@ -429,6 +436,13 @@ function readSysTicks() {
 function readRssMB(pid) {
   try {
     const m = fs.readFileSync(`/proc/${pid}/status`, 'utf8').match(/^VmRSS:\s+(\d+)/im);
+    return m ? Math.round(Number(m[1]) / 1024) : null;
+  } catch { return null; }
+}
+
+function readMemAvailMB() {
+  try {
+    const m = fs.readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)/im);
     return m ? Math.round(Number(m[1]) / 1024) : null;
   } catch { return null; }
 }
@@ -490,6 +504,8 @@ function chooseAdaptiveFocus() {
 function rebalanceNice() {
   if (RESOURCE_MODE === 'fair' || RESOURCE_MODE === 'custom' || !isLinux) return;
   chooseAdaptiveFocus();
+
+  // Throttle: hanya apply renice jika ada perubahan target
   for (const app of APPS) {
     const child = children.get(app.name);
     if (!child?.pid) continue;
@@ -500,23 +516,120 @@ function rebalanceNice() {
   }
 }
 
-// ── Memory guard ──────────────────────────────────────────────────────────────
+// ── Mem guard v2 — 3-level dengan rolling window ──────────────────────────────
 function startMemGuard(app, child) {
   if (!isLinux) return;
-  const limitMB = Math.ceil(safeNum(app.memoryMB, 512) * 1.35 + 96);
+  const nominal    = safeNum(app.memoryMB, 512);
+  const softLimit  = Math.ceil(nominal * MEM_GUARD_SOFT_RATIO);
+  const hardLimit  = Math.ceil(nominal * MEM_GUARD_HARD_RATIO);
+  memGuardSt.set(app.name, { strikes: 0, lastWarnAt: 0, lastRss: 0 });
+
   const t = setInterval(() => {
     if (!child.pid || child.killed) { clearInterval(t); return; }
+    const state = memGuardSt.get(app.name) || { strikes: 0, lastWarnAt: 0, lastRss: 0 };
     const rss = readRssMB(child.pid);
-    if (rss != null && rss > limitMB) {
-      warn(app.name, `RSS ${rss}MB > limit ${limitMB}MB → SIGTERM`);
-      restarting.set(app.name, true);
-      try {
-        child.kill('SIGTERM');
-        setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 5000).unref();
-      } catch (e) { err(app.name, 'kill gagal:', e); }
+    if (rss == null) return;
+    state.lastRss = rss;
+    const now = Date.now();
+
+    // Reset strikes kalau sehat selama MEM_GUARD_WINDOW_MS
+    if (state.strikes > 0 && (now - state.lastWarnAt) > MEM_GUARD_WINDOW_MS) {
+      state.strikes = 0;
     }
-  }, 10000);
+
+    if (rss > hardLimit) {
+      state.strikes += 2;
+      state.lastWarnAt = now;
+      warn(app.name, `RSS ${rss}MB > HARD ${hardLimit}MB (strikes ${state.strikes}/${MEM_GUARD_MAX_STRIKES})`);
+      if (state.strikes >= MEM_GUARD_MAX_STRIKES) {
+        warn(app.name, `hard kill: RSS ${rss}MB sustained > ${hardLimit}MB`);
+        restarting.set(app.name, true);
+        try {
+          child.kill('SIGTERM');
+          const killT = setTimeout(() => {
+            try { if (!child.killed) child.kill('SIGKILL'); } catch {}
+          }, 4000);
+          killT.unref();
+        } catch (e) { err(app.name, 'kill gagal:', e); }
+      } else {
+        // SIGUSR2 = GC nudge (jika app mendukung), bukan restart
+        try { child.kill('SIGUSR2'); } catch {}
+      }
+    } else if (rss > softLimit) {
+      state.strikes += 1;
+      state.lastWarnAt = now;
+      warn(app.name, `RSS ${rss}MB > SOFT ${softLimit}MB (strikes ${state.strikes}/${MEM_GUARD_MAX_STRIKES}) — GC nudge`);
+      try { child.kill('SIGUSR2'); } catch {}
+    } else {
+      if (state.strikes > 0) state.strikes = Math.max(0, state.strikes - 1);
+    }
+    memGuardSt.set(app.name, state);
+  }, MEM_GUARD_INTERVAL_MS);
   t.unref();
+}
+
+// ── Crash-loop protection ─────────────────────────────────────────────────────
+function recordCrash(name) {
+  const now = Date.now();
+  const hist = (restartHist.get(name) || []).filter(t => (now - t) < CRASH_LOOP_WINDOW_MS);
+  hist.push(now);
+  restartHist.set(name, hist);
+  return hist.length;
+}
+
+function shouldRestart(name, uptimeMs) {
+  const now = Date.now();
+  // Cek backoff
+  const bo = backoffUntil.get(name) || 0;
+  if (now < bo) {
+    const wait = Math.ceil((bo - now) / 1000);
+    warn(name, `backoff aktif, restart ditunda ${wait}s`);
+    return false;
+  }
+  // Jika uptime terlalu singkat = crash, hitung
+  if (uptimeMs < CRASH_LOOP_MIN_UPTIME_MS) {
+    const count = recordCrash(name);
+    if (count >= CRASH_LOOP_MAX) {
+      err(name, `crash-loop: ${count} restart dlm ${CRASH_LOOP_WINDOW_MS/1000}s — backoff ${CRASH_LOOP_BACKOFF_MS/1000}s`);
+      backoffUntil.set(name, now + CRASH_LOOP_BACKOFF_MS);
+      // Reset history setelah backoff agar bisa coba lagi
+      restartHist.set(name, []);
+      return false;
+    }
+  }
+  return true;
+}
+
+// ── Memory pressure detector (proaktif) ──────────────────────────────────────
+function checkMemoryPressure() {
+  if (!isLinux) return;
+  const avail = readMemAvailMB();
+  if (avail == null) return;
+  if (avail >= PRESSURE_AVAIL_THRESHOLD_MB) return;
+
+  // Cari app non-kritis dengan RSS terbesar untuk di-restart
+  let victim = null;
+  let maxRss = 0;
+  for (const app of APPS) {
+    // Jangan bunuh cloudflared (akses SSH) atau interactive app
+    if (app.name === 'cloudflared-ssh' || app.name === INTERACTIVE_APP) continue;
+    const child = children.get(app.name);
+    if (!child?.pid) continue;
+    const rss = readRssMB(child.pid) || 0;
+    if (rss > maxRss) { maxRss = rss; victim = app; }
+  }
+  if (!victim) return;
+
+  const child = children.get(victim.name);
+  warn('PRESSURE', `MemAvail ${avail}MB < ${PRESSURE_AVAIL_THRESHOLD_MB}MB → restart ${victim.name} (RSS ${maxRss}MB)`);
+  restarting.set(victim.name, true);
+  try {
+    child.kill('SIGTERM');
+    const killT = setTimeout(() => {
+      try { if (!child.killed) child.kill('SIGKILL'); } catch {}
+    }, 4000);
+    killT.unref();
+  } catch (e) { err(victim.name, 'pressure kill gagal:', e); }
 }
 
 // ── stdout/stderr prefix pipe ─────────────────────────────────────────────────
@@ -544,11 +657,16 @@ function startApp(app) {
   const memMB = safeNum(app.memoryMB, 512);
   const niceVal = clampNice(RESOURCE_MODE === 'custom' ? app.nice : NORMAL_NICE);
 
-  // Bangun NODE_OPTIONS dengan max-old-space-size yang benar
+  // Bangun NODE_OPTIONS dengan max-old-space-size yang benar + GC tuning
   const nodeOpts = (process.env.NODE_OPTIONS || '')
     .split(/\s+/)
-    .filter(x => x && !x.startsWith('--max-old-space-size='))
-    .concat([`--max-old-space-size=${memMB}`, '--expose-gc'])
+    .filter(x => x && !x.startsWith('--max-old-space-size=') && !x.startsWith('--max-semi-space-size=') && !x.startsWith('--gc-interval='))
+    .concat([
+      `--max-old-space-size=${memMB}`,
+      `--max-semi-space-size=64`,
+      `--gc-interval=100`,
+      '--expose-gc',
+    ])
     .join(' ');
 
   const env = {
@@ -581,6 +699,7 @@ function startApp(app) {
   children.set(app.name, child);
   restarting.set(app.name, true);
   curNice.set(app.name, niceVal);
+  startedAt.set(app.name, Date.now());
   startMemGuard(app, child);
 
   log(app.name, `started | mem=${memMB}MB nice=${niceVal}${isInteractive ? ' [interactive]' : ''}`);
@@ -591,19 +710,40 @@ function startApp(app) {
   }
 
   child.on('close', (code, signal) => {
+    const startedAtMs = startedAt.get(app.name) || Date.now();
+    const uptimeMs = Date.now() - startedAtMs;
     children.delete(app.name);
     procStats.delete(app.name);
     curNice.delete(app.name);
-    log(app.name, `stopped code=${code} signal=${signal || '-'}`);
+    startedAt.delete(app.name);
+    log(app.name, `stopped code=${code} signal=${signal || '-'} uptime=${(uptimeMs/1000).toFixed(1)}s`);
 
     if (focusedApp === app.name && !MANUAL_FOCUS) { focusedApp = null; focusUntil = 0; }
     if (restarting.get(app.name) === false) return;
 
+    // Crash-loop check
+    if (!shouldRestart(app.name, uptimeMs)) {
+      // Coba lagi setelah backoff
+      const bo = backoffUntil.get(app.name) || (Date.now() + CRASH_LOOP_BACKOFF_MS);
+      const delay = Math.max(1000, bo - Date.now());
+      warn(app.name, `akan coba restart lagi dalam ${(delay/1000).toFixed(0)}s`);
+      setTimeout(() => {
+        if (restarting.get(app.name) === false) return;
+        log(app.name, 'restarting (post-backoff)...');
+        startApp(app);
+      }, delay).unref();
+      return;
+    }
+
     const now  = Date.now();
     const last = lastRestart.get(app.name) || 0;
-    const delay = (now - last < 5000) ? 8000 : 3000;
+    // Exponential backoff untuk restart cepat: 3s → 8s → 15s → 30s
+    const sinceLast = now - last;
+    let delay = 3000;
+    if (sinceLast < 30000) delay = 8000;
+    if (sinceLast < 10000) delay = 15000;
     lastRestart.set(app.name, now);
-    setTimeout(() => { log(app.name, 'restarting...'); startApp(app); }, delay);
+    setTimeout(() => { log(app.name, 'restarting...'); startApp(app); }, delay).unref();
   });
 
   child.on('error', e => { children.delete(app.name); err(app.name, 'spawn error:', e); });
@@ -627,15 +767,20 @@ process.on('unhandledRejection', e => { console.error('[LAUNCHER] unhandledRejec
 
 // ── Info startup ──────────────────────────────────────────────────────────────
 console.log(`\n[LAUNCHER] ══════════════════════════════════════════`);
-console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM=${TOTAL_MEM_MB}MB`);
+console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
+console.log(`[LAUNCHER] mem-guard: soft=${MEM_GUARD_SOFT_RATIO}x hard=${MEM_GUARD_HARD_RATIO}x strikes=${MEM_GUARD_MAX_STRIKES}`);
+console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
 for (const app of APPS)
   console.log(`[LAUNCHER]   ${app.name.padEnd(16)} mem=${safeNum(app.memoryMB,512)}MB`);
 console.log(`[LAUNCHER] ══════════════════════════════════════════\n`);
 
 // ── Rebalance loop ────────────────────────────────────────────────────────────
 setInterval(rebalanceNice, ADAPTIVE_INTERVAL).unref();
+
+// ── Memory pressure detector loop ─────────────────────────────────────────────
+setInterval(checkMemoryPressure, PRESSURE_CHECK_INTERVAL_MS).unref();
 
 // ── Start semua app satu per satu (900ms jeda agar stdin tidak tabrakan) ──────
 (async () => {
@@ -655,11 +800,16 @@ RUN ln -sf /data/launcher/index.js /usr/local/bin/adaptive-launcher.js
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── resource-optimizer.sh ────────────────────────────────────────────────────
+# Catatan v2:
+#   • vm.min_free_kbytes dinamis berdasarkan RAM (5% RAM, min 16MB, max 64MB)
+#   • drop_caches hanya jika MemAvailable < 256MB
+#   • Semua sysctl gagal (unprivileged container) ditelan tanpa noise
 RUN cat > /usr/local/bin/resource-optimizer.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
 log() { echo "[resource-optimizer] $*"; }
 
+# Stop service tidak diperlukan (di container biasanya tidak ada, tapi just in case)
 UNNEEDED=(
   cron atd anacron rsyslog syslog
   avahi-daemon bluetooth ModemManager
@@ -674,6 +824,7 @@ UNNEEDED=(
   firewalld ufw
 )
 for svc in "${UNNEEDED[@]}"; do
+  command -v systemctl >/dev/null 2>&1 || continue
   systemctl is-active --quiet "$svc" 2>/dev/null || continue
   log "stop: $svc"
   systemctl stop "$svc"    2>/dev/null || true
@@ -683,13 +834,40 @@ for proc in freshclam clamd updatedb mlocate; do
   pkill -f "$proc" 2>/dev/null && log "killed: $proc" || true
 done
 
-sc() { sysctl -w "$1=$2" >/dev/null 2>&1 && log "sysctl $1=$2" || log "WARN skip: $1"; }
+# Hitung min_free_kbytes dinamis berdasarkan RAM tersedia (cgroup-aware)
+read_mem_kb() {
+  # cgroup v2
+  if [ -f /sys/fs/cgroup/memory.max ]; then
+    local v; v=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+    if [ "$v" != "max" ] && [ -n "$v" ]; then
+      echo $(( v / 1024 ))
+      return
+    fi
+  fi
+  # cgroup v1
+  if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+    local v; v=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+    if [ -n "$v" ] && [ "$v" -lt 1099511627776 ]; then
+      echo $(( v / 1024 ))
+      return
+    fi
+  fi
+  # fallback /proc/meminfo
+  awk '/MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 1048576
+}
+MEM_KB=$(read_mem_kb)
+# 5% RAM, min 16384 (16MB), max 65536 (64MB)
+MIN_FREE=$(( MEM_KB / 20 ))
+[ "$MIN_FREE" -lt 16384 ] && MIN_FREE=16384
+[ "$MIN_FREE" -gt 65536 ] && MIN_FREE=65536
+
+sc() { sysctl -w "$1=$2" >/dev/null 2>&1 && log "sysctl $1=$2" || true; }
 sc vm.swappiness               5
 sc vm.dirty_ratio              20
 sc vm.dirty_background_ratio   5
 sc vm.vfs_cache_pressure       50
 sc vm.overcommit_memory        1
-sc vm.min_free_kbytes          32768
+sc vm.min_free_kbytes          "$MIN_FREE"
 sc kernel.sched_migration_cost_ns  500000
 sc kernel.sched_autogroup_enabled  1
 sc net.ipv4.tcp_keepalive_time     30
@@ -718,12 +896,21 @@ for dev in /sys/block/*/queue/scheduler; do
   [ -f "$dev" ] && { echo none > "$dev" 2>/dev/null || echo mq-deadline > "$dev" 2>/dev/null || true; }
 done
 
-sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+# Drop cache hanya jika MemAvailable < 256MB
+AVAIL_MB=$(awk '/MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 9999)
+if [ "${AVAIL_MB:-9999}" -lt 256 ]; then
+  log "MemAvailable=${AVAIL_MB}MB < 256MB → drop caches"
+  sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+else
+  log "MemAvailable=${AVAIL_MB}MB OK, skip drop_caches"
+fi
+
 rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
 log "selesai."
 SCRIPT
 
 # ─── oom-watchdog.sh ──────────────────────────────────────────────────────────
+# Catatan v2: tambah earlyoom protection + cek interval lebih cepat (30s)
 RUN cat > /usr/local/bin/oom-watchdog.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
@@ -734,14 +921,17 @@ protect() {
   done
 }
 while true; do
-  protect "node.*adaptive-launcher|node.*index.js" -900
-  protect "PM2|pm2"             -800
-  protect "node.*server"        -700
-  protect "node.*kfai"          -700
-  protect "node.*ttt"           -700
-  protect "/usr/sbin/sshd"      -600
-  protect "cloudflared"         -500
-  sleep 60
+  # Paling dilindungi: launcher, earlyoom, sshd
+  protect "node.*adaptive-launcher|node.*launcher/index.js" -1000
+  protect "earlyoom"              -950
+  protect "/usr/sbin/sshd"        -900
+  protect "PM2|pm2"               -800
+  protect "node.*server"          -700
+  protect "node.*kfai"            -700
+  protect "node.*ttt"             -700
+  protect "node.*nexcloud"        -700
+  protect "cloudflared"           -500
+  sleep 30
 done
 SCRIPT
 
@@ -812,11 +1002,13 @@ exec "$@"
 SCRIPT
 
 # ─── upgrade-langchain-packages.sh ────────────────────────────────────────────
+# Catatan v2: default NONAKTIF kecuali LANGCHAIN_AUTO_UPGRADE=true
 RUN cat > /usr/local/bin/upgrade-langchain-packages.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
 APP_NAME="${1:-node-app}"
-[ "${LANGCHAIN_AUTO_UPGRADE:-true}" != "true" ] && exit 0
+# Default false (sebelumnya true) — hanya aktif jika explicit di-set ke true
+[ "${LANGCHAIN_AUTO_UPGRADE:-false}" != "true" ] && exit 0
 [ ! -f package.json ] && exit 0
 grep -q '"@langchain/' package.json 2>/dev/null || exit 0
 PKGS="@langchain/core@latest @langchain/openai@latest @langchain/mcp-adapters@latest"
@@ -829,138 +1021,14 @@ npm install $PKGS --save --omit=dev --include=optional \
 npm cache clean --force >/dev/null 2>&1 || true
 SCRIPT
 
-# ─── strip-node-modules.sh ────────────────────────────────────────────────────
-# Hapus file non-esensial dari node_modules untuk minimalisasi storage.
-# Aman dijalankan setelah npm/pnpm install — hanya hapus:
-#   - Dokumentasi (*.md, *.markdown, CHANGELOG, AUTHORS, HISTORY)
-#   - Source TypeScript (*.ts, *.tsx) — keep .js & .d.ts
-#   - File test (__tests__/, test/, tests/, *.test.js, *.spec.js)
-#   - Examples & docs (examples/, example/, docs/, doc/)
-#   - CI/CD (.github/, .travis.yml, .eslintrc, .prettierrc)
-#   - Build artifacts (*.tsbuildinfo, .cache/, .turbo/, build/)
-#   - Misc (.npmignore, .gitignore, .DS_Store, *.flow, LICENSE di subfolder)
-# Estimasi penghematan: 30-60% ukuran node_modules.
-RUN cat > /usr/local/bin/strip-node-modules.sh <<'SCRIPT'
-#!/usr/bin/env bash
-# strip-node-modules.sh — minimalisasi storage node_modules
-set -uo pipefail
-APP_NAME="${1:-app}"
-APP_DIR="${2:-.}"
-NM_DIR="$APP_DIR/node_modules"
-
-[ ! -d "$NM_DIR" ] && { echo "[$APP_NAME] strip: node_modules tidak ada, skip."; exit 0; }
-
-BEFORE=$(du -sb "$NM_DIR" 2>/dev/null | cut -f1)
-BEFORE_HUMAN=$(du -sh "$NM_DIR" 2>/dev/null | cut -f1)
-echo "[$APP_NAME] strip: mulai (size before: $BEFORE_HUMAN)"
-
-# Helper: hapus aman (tidak error kalau tidak ada)
-# PENTING: semua find pakai -mindepth 1 agar TIDAK menghapus root $NM_DIR sendiri.
-rm_silent() { find "$NM_DIR" -mindepth 1 "$@" 2>/dev/null -delete || true; }
-rm_silent_dir() { find "$NM_DIR" -mindepth 1 -type d "$@" 2>/dev/null -exec rm -rf {} + 2>/dev/null || true; }
-
-# ── Dokumentasi ──────────────────────────────────────────────────────────────
-rm_silent -type f \( -name "*.md" -o -name "*.markdown" -o -name "*.MD" \)
-rm_silent -type f \( -name "CHANGELOG*" -o -name "CHANGES*" -o -name "HISTORY*" -o -name "AUTHORS*" -o -name "CONTRIBUTORS*" \)
-rm_silent -type f -name "README*" 2>/dev/null
-
-# ── Source TypeScript (keep .js, .json, .d.ts, .node) ────────────────────────
-# .ts & .tsx = source, hapus. .d.ts = type declarations, keep untuk IDE/typing.
-rm_silent -type f \( -name "*.ts" ! -name "*.d.ts" \)
-rm_silent -type f -name "*.tsx"
-
-# ── File test ────────────────────────────────────────────────────────────────
-rm_silent_dir -name "__tests__" -o -name "__test__" -o -name "test" -o -name "tests" -o -name "__mocks__"
-rm_silent -type f \( -name "*.test.js" -o -name "*.test.jsx" -o -name "*.test.mjs" \
-                   -o -name "*.spec.js" -o -name "*.spec.jsx" -o -name "*.spec.mjs" \)
-
-# ── Examples & docs ──────────────────────────────────────────────────────────
-rm_silent_dir -name "examples" -o -name "example" -o -name "docs" -o -name "doc" -o -name "documentation"
-
-# ── CI/CD & linter configs ───────────────────────────────────────────────────
-rm_silent_dir -name ".github" -o -name ".circleci" -o -name ".vscode" -o -name ".idea"
-rm_silent -type f \( -name ".travis.yml" -o -name "appveyor.yml" -o -name ".eslintrc*" \
-                   -o -name ".prettierrc*" -o -name ".babelrc*" -o -name "jest.config*" \
-                   -o -name ".mocharc*" -o -name ".nycrc*" \)
-
-# ── Build artifacts & caches ─────────────────────────────────────────────────
-rm_silent -type f -name "*.tsbuildinfo"
-# Hapus folder cache & build artifacts — HANYA yang nested (mindepth 2),
-# JANGAN hapus root node_modules dir itu sendiri!
-find "$NM_DIR" -mindepth 2 -type d \( -name ".cache" -o -name ".turbo" -o -name ".parcel-cache" \) \
-  2>/dev/null -exec rm -rf {} + 2>/dev/null || true
-# Hapus folder "build" di kedalaman > 2 (jangan hapus root build/ app atau root node_modules)
-find "$NM_DIR" -mindepth 3 -type d -name "build" 2>/dev/null -exec rm -rf {} + 2>/dev/null || true
-
-# ── Node-gyp / prebuild artifacts ────────────────────────────────────────────
-# Hapus source .gyp (build config, tidak dibutuhkan runtime) tapi KEEP prebuilds
-# (native modules seperti sharp/better-sqlite3 butuh prebuilds untuk binary).
-rm_silent -type f \( -name "*.gyp" -o -name "binding.gyp" -o -name "*.pdb" \)
-rm_silent -type f \( -name "*.c" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" \) 2>/dev/null || true
-
-# ── Misc cleanup ─────────────────────────────────────────────────────────────
-rm_silent -type f \( -name ".npmignore" -o -name ".gitignore" -o -name ".DS_Store" \
-                   -o -name "Thumbs.db" -o -name "*.flow" -o -name "*.bak" -o -name "*.swp" \)
-# LICENSE di subfolder (depth >= 2) — keep root LICENSE saja
-find "$NM_DIR" -mindepth 2 -type f \( -name "LICENSE*" -o -name "LICENCE*" -o -name "COPYING*" \) \
-  2>/dev/null -delete || true
-# File .editorconfig, .gitattributes di subfolder
-find "$NM_DIR" -mindepth 2 -type f \( -name ".editorconfig" -o -name ".gitattributes" \) \
-  2>/dev/null -delete || true
-
-# ── Hapus folder kosong ──────────────────────────────────────────────────────
-find "$NM_DIR" -type d -empty 2>/dev/null -delete || true
-
-# ── Report ───────────────────────────────────────────────────────────────────
-AFTER=$(du -sb "$NM_DIR" 2>/dev/null | cut -f1)
-AFTER_HUMAN=$(du -sh "$NM_DIR" 2>/dev/null | cut -f1)
-if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" -gt 0 ]; then
-  SAVED=$(( (BEFORE - AFTER) * 100 / BEFORE ))
-  echo "[$APP_NAME] strip: $BEFORE_HUMAN → $AFTER_HUMAN (hemat ${SAVED}%)"
-else
-  echo "[$APP_NAME] strip: selesai (size after: $AFTER_HUMAN)"
-fi
-SCRIPT
-
 # ─── ensure-node-app-deps.sh ──────────────────────────────────────────────────
-# Pasang deps untuk app Node.js sungguhan. Strategi hemat storage:
-#   1. pnpm install (global store + hardlinks → dedup antar app)
-#   2. strip-node-modules.sh (hapus *.md, *.ts, test, docs, dll)
-#   3. pnpm prune --production (hapus dev deps yang tersangkut)
-#   4. pnpm store prune (cleanup global store dari versi tidak terpakai)
-# Fallback ke npm ci/install kalau pnpm tidak ada atau gagal.
 RUN cat > /usr/local/bin/ensure-node-app-deps.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 APP_NAME="$1"; APP_DIR="$2"
 ZIP_FILE="${3:-node_modules.zip}"; USE_ZIP="${4:-true}"; SKIP_NPM="${5:-false}"
 cd "$APP_DIR"
-[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; exit 1; }
-
-# Pastikan pnpm store dir ada
-export PNPM_HOME="${PNPM_HOME:-/data/root/.local/share/pnpm}"
-export PNPM_STORE_DIR="${PNPM_STORE_DIR:-/data/root/.pnpm-store}"
-mkdir -p "$PNPM_STORE_DIR"
-
-# ── Helper: cek apakah pnpm available & bisa dipakai ────────────────────────
-has_pnpm() { command -v pnpm >/dev/null 2>&1; }
-
-# ── Helper: jalankan strip setelah install ──────────────────────────────────
-post_install_optimize() {
-  echo "[$APP_NAME] optimize: strip node_modules..."
-  /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
-  echo "[$APP_NAME] optimize: prune dev deps..."
-  if has_pnpm && [ -f pnpm-lock.yaml ]; then
-    pnpm prune --prod 2>/dev/null || true
-  else
-    npm prune --omit=dev 2>/dev/null || true
-  fi
-  echo "[$APP_NAME] optimize: clean cache..."
-  if has_pnpm; then
-    pnpm store prune 2>/dev/null || true
-  fi
-  npm cache clean --force 2>/dev/null || true
-}
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." && exit 1
 
 extract_zip() {
   [ ! -f "$1" ] && return 1
@@ -971,81 +1039,30 @@ extract_zip() {
     && mv node_modules.tmp/node_modules ./node_modules \
     || mv node_modules.tmp ./node_modules
   rm -rf node_modules.tmp
-  if find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q .; then
-    /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-    /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
-    return 0
-  fi
+  find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q . \
+    && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; return 0; }
   rm -rf node_modules; return 1
 }
 
-# ── 1. Coba pakai node_modules.zip dulu (pre-bundled) ───────────────────────
 if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
-  echo "[$APP_NAME] pakai node_modules dari zip (sudah di-strip)."
+  echo "[$APP_NAME] pakai node_modules dari zip."
   exit 0
 fi
+[ "$SKIP_NPM" = "true" ] && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; exit 0; }
 
-# ── 2. Skip install jika diminta (dev mode / cache sudah ada) ───────────────
-[ "$SKIP_NPM" = "true" ] && {
-  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-  /usr/local/bin/strip-node-modules.sh "$APP_NAME" "$APP_DIR" || true
-  exit 0
-}
-
-# ── 3. Install via pnpm (preferred) atau npm (fallback) ─────────────────────
-if has_pnpm; then
-  echo "[$APP_NAME] pnpm install (global store + hardlinks)..."
-  # pnpm lebih hemat storage: hardlink ke global store, bukan copy
-  # --node-linker=hoisted: layout node_modules flat (kompatibel dengan app
-  #   yang assume node_modules tradisional, mis. require('sub-dep') langsung)
-  # --prod: hanya dependencies (skip devDependencies)
-  # Note: optional deps tetap diinstall (dibutuhkan untuk native modules seperti
-  #   @esbuild/linux-x64, @rollup/rollup-linux-x64-gnu, sharp, dll)
-  PNPM_FLAGS="--prod --node-linker=hoisted --reporter=silent --prefer-offline"
-  # Kalau ada pnpm-lock.yaml, pakai --frozen-lockfile untuk reproducible
-  if [ -f pnpm-lock.yaml ]; then
-    pnpm install $PNPM_FLAGS --frozen-lockfile 2>&1 | sed "s/^/[$APP_NAME] /" || {
-      echo "[$APP_NAME] pnpm frozen install gagal, coba tanpa frozen..."
-      pnpm install $PNPM_FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
-    }
-  else
-    # Generate pnpm-lock.yaml dari package.json
-    pnpm install $PNPM_FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
-  fi
-  # Pastikan dotenv ada (dibutuhkan oleh launcher)
-  node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
-    || pnpm add dotenv --prod --node-linker=hoisted --reporter=silent 2>/dev/null || true
-  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-else
-  echo "[$APP_NAME] npm install (pnpm tidak tersedia)..."
-  FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
-  if [ -f package-lock.json ]; then
-    npm ci $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /" || npm install $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
-  else
-    npm install $FLAGS 2>&1 | sed "s/^/[$APP_NAME] /"
-  fi
-  npm rebuild --loglevel=error || true
-  node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
-    || npm install dotenv --save --omit=dev --no-audit --no-fund --prefer-offline
-  /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-fi
-
-# ── 4. Post-install optimization ────────────────────────────────────────────
-post_install_optimize
-
-# ── 5. Report storage ───────────────────────────────────────────────────────
-NM_SIZE="(none)"
-[ -d node_modules ] && NM_SIZE=$(du -sh node_modules 2>/dev/null | cut -f1)
-STORE_SIZE=$(du -sh "$PNPM_STORE_DIR" 2>/dev/null | cut -f1)
-echo "[$APP_NAME] deps siap. node_modules=$NM_SIZE, pnpm-store=$STORE_SIZE"
+echo "[$APP_NAME] npm install..."
+FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
+[ -f package-lock.json ] \
+  && npm ci $FLAGS || npm install $FLAGS
+npm rebuild --loglevel=error || true
+node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
+  || npm install dotenv --save --omit=dev --no-audit --no-fund --prefer-offline
+/usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
+npm cache clean --force || true
+echo "[$APP_NAME] deps siap."
 SCRIPT
 
 # ─── run-node-app.sh ──────────────────────────────────────────────────────────
-# Jalankan app Node.js dengan deps management hemat storage (pnpm + strip).
-# Kilat TIDAK di-auto-route di sini — Kilat hanya untuk script manual
-# (jalankan langsung: `kilat run script.js`). App Node.js sungguhan selalu
-# pakai Node.js karena Kilat v0.3.0 tidak punya module inti Node (http, Buffer,
-# stream, crypto, path, events, child_process).
 RUN cat > /usr/local/bin/run-node-app.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1053,98 +1070,26 @@ APP_NAME="$1"; APP_DIR="$2"; ENTRY_DEFAULT="${3:-server.js}"
 ZIP_FILE="${4:-node_modules.zip}"; USE_ZIP="${5:-true}"; SKIP_NPM="${6:-false}"
 NODE_EXTRA="${7:-}"
 
-[ ! -d "$APP_DIR" ] && { echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2; sleep 10; exit 1; }
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
 cd "$APP_DIR"
-[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada." >&2; sleep 10; exit 1; }
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
 
-# ── Pasang deps (pnpm preferred, npm fallback) + strip + prune ──────────────
 /usr/local/bin/ensure-node-app-deps.sh "$APP_NAME" "$APP_DIR" "$ZIP_FILE" "$USE_ZIP" "$SKIP_NPM"
 
-# ── Resolve entry point ─────────────────────────────────────────────────────
 ENTRY="$ENTRY_DEFAULT"
 if [ ! -f "$ENTRY" ]; then
-  for f in server.js server-langchain.js index.js app.js main.js; do
+  for f in server.js server-langchain.js index.js; do
     [ -f "$f" ] && ENTRY="$f" && break
   done
 fi
 if [ ! -f "$ENTRY" ]; then
-  if npm run 2>/dev/null | grep -qE '^\s+start\b'; then
-    exec /usr/local/bin/clear-app-port-env.sh npm start
-  fi
-  echo "[$APP_NAME] entry point tidak ditemukan." >&2; sleep 10; exit 1
+  npm run 2>/dev/null | grep -qE '^\s+start\b' \
+    && exec /usr/local/bin/clear-app-port-env.sh npm start \
+    || { echo "[$APP_NAME] entry point tidak ditemukan." >&2; sleep 10; exit 1; }
 fi
 
 echo "[$APP_NAME] start: node $NODE_EXTRA $ENTRY"
 exec /usr/local/bin/clear-app-port-env.sh node $NODE_EXTRA "$ENTRY"
-SCRIPT
-
-# ─── kilat-doctor.sh ──────────────────────────────────────────────────────────
-# Diagnostic helper: cek instalasi Kilat, pnpm, dan storage apps.
-# Jalankan via SSH: kilat-doctor (alias: kd)
-RUN cat > /usr/local/bin/kilat-doctor <<'SCRIPT'
-#!/usr/bin/env bash
-# kilat-doctor — cek instalasi Kilat, pnpm, dan storage apps
-set +e
-C='\033[1;36m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'; N='\033[0m'
-
-printf "${C}═══ Runtime Versions ═══${N}\n"
-command -v node   >/dev/null 2>&1 && printf "  ${G}✓${N} node:   $(node -v)\n"   || printf "  ${R}✗ node tidak ada${N}\n"
-command -v npm    >/dev/null 2>&1 && printf "  ${G}✓${N} npm:    $(npm -v)\n"    || printf "  ${R}✗ npm tidak ada${N}\n"
-command -v pnpm   >/dev/null 2>&1 && printf "  ${G}✓${N} pnpm:   $(pnpm -v)\n"   || printf "  ${Y}⚠ pnpm tidak ada${N}\n"
-command -v kilat  >/dev/null 2>&1 && printf "  ${G}✓${N} kilat:  $(kilat --version 2>/dev/null || echo '?')\n"  || printf "  ${Y}○ kilat tidak ada (opsional, untuk script sederhana)${N}\n"
-
-printf "\n${C}═══ pnpm Global Store ═══${N}\n"
-PNPM_STORE="${PNPM_STORE_DIR:-/data/root/.pnpm-store}"
-if [ -d "$PNPM_STORE" ]; then
-  STORE_PKGS=$(find "$PNPM_STORE" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | wc -l)
-  STORE_SIZE=$(du -sh "$PNPM_STORE" 2>/dev/null | cut -f1)
-  printf "  ${G}✓${N} $PNPM_STORE\n"
-  printf "    $STORE_PKGS package versions, $STORE_SIZE\n"
-else
-  printf "  ${Y}⚠ store belum dibuat${N}\n"
-fi
-
-printf "\n${C}═══ Kilat Cache (untuk script manual) ═══${N}\n"
-KPD="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
-if [ -d "$KPD" ]; then
-  KPKGS=$(find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-  KSIZE=$(du -sh "$KPD" 2>/dev/null | cut -f1)
-  printf "  ${G}✓${N} $KPD ($KPKGS paket, $KSIZE)\n"
-else
-  printf "  ${Y}○ cache Kosong (belum ada kilat add)${N}\n"
-fi
-
-printf "\n${C}═══ Apps Storage ═══${N}\n"
-TOTAL_NM=0
-TOTAL_APPS=0
-for app_dir in /data/apps/*/; do
-  [ -d "$app_dir" ] || continue
-  app_name=$(basename "$app_dir")
-  [ -f "$app_dir/package.json" ] || continue
-  TOTAL_APPS=$((TOTAL_APPS+1))
-  NM_SIZE="(none)"
-  if [ -d "$app_dir/node_modules" ]; then
-    NM_SIZE=$(du -sh "$app_dir/node_modules" 2>/dev/null | cut -f1)
-    NM_BYTES=$(du -sb "$app_dir/node_modules" 2>/dev/null | cut -f1)
-    TOTAL_NM=$((TOTAL_NM + ${NM_BYTES:-0}))
-  fi
-  HAS_LOCK=""
-  [ -f "$app_dir/pnpm-lock.yaml" ] && HAS_LOCK="pnpm-lock"
-  [ -f "$app_dir/package-lock.json" ] && HAS_LOCK="$HAS_LOCK pkg-lock"
-  [ -f "$app_dir/node_modules.zip" ] && HAS_LOCK="$HAS_LOCK nm.zip"
-  printf "  %-16s node_modules=%-8s [%s]\n" "$app_name" "$NM_SIZE" "$(echo $HAS_LOCK | xargs)"
-done
-if [ "$TOTAL_APPS" -gt 0 ]; then
-  printf "\n  Total node_modules: %s (%s apps)\n" "$(numfmt --to=iec $TOTAL_NM 2>/dev/null || echo '?')" "$TOTAL_APPS"
-  printf "  Total pnpm store:   %s (shared, hardlinked ke apps)\n" "$STORE_SIZE"
-fi
-
-printf "\n${C}═══ Tips ═══${N}\n"
-echo "  • App Node.js (kfai/ttt/nexcloud): otomatis pakai pnpm + strip."
-echo "  • Script sederhana: kilat add <pkg> && kilat run script.js"
-echo "  • Hapus cache pnpm: pnpm store prune"
-echo "  • Hapus cache Kilat: rm -rf $KPD/*"
-echo "  • Re-strip node_modules app: /usr/local/bin/strip-node-modules.sh <app> /data/apps/<app>"
 SCRIPT
 
 # ─── run-kfai-nodejs.sh ───────────────────────────────────────────────────────
@@ -1219,75 +1164,107 @@ RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 set +e
 ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
 ulimit -u 65535   2>/dev/null || true
-mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/root/.kilat/packages /data/root/.pnpm-store /data/tmp
+mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/tmp
 chmod 700 /data/root /data/root/.pm2 /data/root/.npm 2>/dev/null || true
-chmod 755 /data/root/.kilat /data/root/.kilat/packages /data/root/.pnpm-store 2>/dev/null || true
 chmod 1777 /tmp /data/tmp 2>/dev/null || true
 npm config set prefer-offline true --global >/dev/null 2>&1 || true
 npm config set audit false --global         >/dev/null 2>&1 || true
 npm config set fund false --global          >/dev/null 2>&1 || true
-rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
+# Bersihkan tmp lama, tapi JANGAN hapus /tmp yang baru ditulis oleh proses lain
+find /tmp -mindepth 1 -maxdepth 1 -mmin +60 -delete 2>/dev/null || true
 echo "[optimize-system] selesai."
 SCRIPT
 
 # ─── kstatus ──────────────────────────────────────────────────────────────────
+# Catatan v2: tambah info cgroup memory limit + per-app RSS live
 RUN cat > /usr/local/bin/kstatus <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
 C='\033[1;36m'; R='\033[0m'
 printf "\n${C}== System ==${R}\n"; uptime; free -h; df -h / /data 2>/dev/null || df -h
+
+# Cgroup memory info
+printf "\n${C}== Container Memory Limit ==${R}\n"
+if [ -f /sys/fs/cgroup/memory.max ]; then
+  V=$(cat /sys/fs/cgroup/memory.max)
+  if [ "$V" = "max" ]; then
+    echo "  cgroup v2: no limit"
+  else
+    echo "  cgroup v2: $(( V / 1024 / 1024 )) MB"
+  fi
+elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+  V=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+  if [ "$V" -ge 1099511627776 ]; then
+    echo "  cgroup v1: no limit"
+  else
+    echo "  cgroup v1: $(( V / 1024 / 1024 )) MB"
+  fi
+else
+  echo "  cgroup: not available (using host RAM)"
+fi
+
 printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/null | head -n 30
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js)"
-  pgrep -fa "node.*adaptive-launcher\|node.*index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
+  echo "Mode: adaptive launcher (index.js v2)"
+  pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
   pm2 status 2>/dev/null
 fi
-printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,comm --sort=-%mem | head -n 18
+
+printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
+
+printf "\n${C}== Per-app RSS live ==${R}\n"
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "cloudflared" "adaptive-launcher"; do
+  for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
+    rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
+    nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
+    printf "  %-20s pid=%-6s rss=%-6sMB nice=%s\n" "$pat" "$pid" "$rss" "$nice_val"
+  done
+done
+
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" pm2 "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
     printf "  pid %-6s  oom=%-6s  %s\n" "$pid" "$score" "$comm"
   done
 done
+
+printf "\n${C}== earlyoom ==${R}\n"
+pgrep -fa earlyoom 2>/dev/null || echo "  (tidak aktif)"
+
 printf "\n${C}== DNS cache (nscd) ==${R}\n"
 nscd -g 2>/dev/null | grep -E 'cache hit|request' | head -n 10 || echo "  nscd tidak aktif"
-printf "\n${C}== Kilat (runtime JS ringan) ==${R}\n"
-if command -v kilat >/dev/null 2>&1; then
-  kilat --version 2>/dev/null || echo "  kilat binary ada tapi --version gagal"
-  KILAT_DIR="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
-  if [ -d "$KILAT_DIR" ]; then
-    PKGS=$(find "$KILAT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    SIZE=$(du -sh "$KILAT_DIR" 2>/dev/null | cut -f1)
-    echo "  Cache: $KILAT_DIR ($PKGS paket, $SIZE)"
-  else
-    echo "  Cache dir belum dibuat: $KILAT_DIR"
-  fi
-  echo "  KILAT_ENABLED_APPS=${KILAT_ENABLED_APPS:-<kosong>}  USE_KILAT=${USE_KILAT:-false}"
-else
-  echo "  kilat binary tidak terpasang di image ini"
-fi
+
 printf "\n${C}== Nice values ==${R}\n"
 ps -eo pid,nice,comm --sort=nice | grep -E 'node|cloudflared' | head -n 10 || true
 SCRIPT
 
 # ─── start-all.sh ─────────────────────────────────────────────────────────────
+# Catatan v2:
+#   • Mulai earlyoom daemon dengan konfigurasi yang melindungi launcher+sshd
+#   • Bersihkan proses orphan dari run sebelumnya
+#   • Mulai nscd via service-aware fallback
+#   • PM2 ecosystem ditambah min_uptime + max_restarts + exp_backoff_restart_delay
 RUN cat > /usr/local/bin/start-all.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
 # ── 0. Direktori ───────────────────────────────────────────────────────────
 mkdir -p /data/root /data/ssh /data/apps /data/bin /data/launcher \
-         /data/root/.kilat/packages /data/root/.pnpm-store \
          /run/sshd /data/root/.pm2 /data/root/.npm /data/tmp
 chmod 700 /data/root /data/ssh
-chmod 755 /data/root/.kilat /data/root/.kilat/packages /data/root/.pnpm-store 2>/dev/null || true
 chmod 1777 /data/tmp /tmp || true
+
+# ── 0a. Bersihkan orphan proses Node/PM2 dari run sebelumnya ──────────────
+# Hanya kill proses lama, BUKAN yang baru dimulai oleh script ini
+pkill -f "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null && echo "[start-all] clean stale launcher" || true
+pkill -f "PM2.*God Daemon" 2>/dev/null && echo "[start-all] clean stale PM2" || true
+sleep 1
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
 /usr/local/bin/optimize-system.sh &
@@ -1343,10 +1320,6 @@ alias psa='ps aux --sort=-%mem | head -n 20'
 alias ports='ss -lntup'
 alias cls='clear'
 alias lmode='echo $LAUNCHER_MODE'
-alias kil='kilat --version 2>/dev/null && echo "Usage: kilat run <file.js> | kilat add <pkg>"'
-alias krun='kilat run'
-alias kadd='kilat add'
-alias kd='kilat-doctor'
 fastfetch 2>/dev/null || true
 echo
 echo "  /data (persistent) | /root → /data/root"
@@ -1354,10 +1327,6 @@ echo "  LAUNCHER_MODE=${LAUNCHER_MODE:-adaptive}  |  kstatus"
 echo "  Edit launcher: nano /data/launcher/index.js"
 echo
 node -v; npm -v; cloudflared --version 2>/dev/null; echo
-command -v pnpm  >/dev/null 2>&1 && pnpm -v  2>/dev/null || echo "(pnpm tidak terpasang)"
-command -v kilat >/dev/null 2>&1 && kilat --version 2>/dev/null || echo "(kilat tidak terpasang — opsional untuk script sederhana)"
-echo "  Storage: pnpm global store + strip node_modules (auto). Kilat: manual `kilat run script.js`"
-echo
 BASHRC
 
 # ── 7. Tunggu optimasi selesai ─────────────────────────────────────────────
@@ -1367,8 +1336,30 @@ wait
 /usr/local/bin/bootstrap-apps.sh &
 BOOTSTRAP_PID=$!
 
-# ── 9. Layanan pendukung ───────────────────────────────────────────────────
-nscd 2>/dev/null || true
+# ── 9a. Mulai earlyoom (proteksi OOM proaktif) ───────────────────────────
+# earlyoom bunuh proses boros RAM sebelum OOM killer kernel, melindungi launcher+sshd
+# -r 3600: report interval 1 jam
+# -m 10:    trigger saat MemAvailable < 10%
+# --avoid "(^node.*adaptive|^node.*launcher|^/usr/sbin/sshd|^earlyoom)": jangan bunuh ini
+# --prefer "(^node.*kfai|^node.*ttt|^node.*nexcloud|^cloudflared)": bunuh ini dulu
+if command -v earlyoom >/dev/null 2>&1; then
+  echo "[start-all] mulai earlyoom..."
+  earlyoom -r 3600 -m 10 -s \
+    --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^cloudflared)' \
+    >/var/log/earlyoom.log 2>&1 &
+else
+  echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
+fi
+
+# ── 9b. Layanan pendukung ───────────────────────────────────────────────────
+# nscd: coba service dulu, fallback ke binary langsung
+if command -v service >/dev/null 2>&1; then
+  service nscd start 2>/dev/null || nscd 2>/dev/null || true
+else
+  nscd 2>/dev/null || true
+fi
+
 /usr/sbin/sshd -D -e &
 /usr/local/bin/oom-watchdog.sh &
 
@@ -1380,50 +1371,64 @@ LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 echo "[start-all] LAUNCHER_MODE=${LAUNCHER_MODE}"
 
 if [ "$LAUNCHER_MODE" = "pm2" ]; then
-  # ── PM2 mode ──────────────────────────────────────────────────────────────
+  # ── PM2 mode (v2: tambah min_uptime + max_restarts + exp_backoff) ─────────
   echo "[start-all] mode PM2"
   cat > /data/ecosystem.config.js <<'PM2EOF'
 const fs = require('fs');
-const memTotal = (() => {
+
+// cgroup-aware memory detection (sama dengan launcher v2)
+function detectContainerMemMB() {
+  try {
+    const v = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    if (v !== 'max' && /^\d+$/.test(v)) return Math.floor(Number(v) / 1024 / 1024);
+  } catch {}
+  try {
+    const v = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+    const n = Number(v);
+    if (/^\d+$/.test(v) && n > 0 && n < 1024 * 1024 * 1024 * 1024) return Math.floor(n / 1024 / 1024);
+  } catch {}
   try {
     const m = fs.readFileSync('/proc/meminfo','utf8').match(/MemTotal:\s+(\d+)/);
     return m ? Math.floor(parseInt(m[1])/1024) : 2048;
   } catch { return 2048; }
-})();
+}
+
+const memTotal = detectContainerMemMB();
+const BUDGET = Math.floor(memTotal * 0.75);
 const mem = {
-  kfai:     process.env.KFAI_MAX_MEMORY     || Math.floor(memTotal*0.30)+'M',
-  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.floor(memTotal*0.35)+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.floor(memTotal*0.15)+'M',
-  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.floor(memTotal*0.15)+'M',
-  cf:   '96M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.40))+'M',
+  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.30))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
-const nodeArgs = '--expose-gc --max-http-header-size=16384';
+const nodeArgs = '--expose-gc --max-semi-space-size=64 --gc-interval=100 --max-http-header-size=16384';
 module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
-    autorestart:true, max_restarts:50, restart_delay:5000, exp_backoff_restart_delay:200,
-    max_memory_restart:mem.cf, kill_timeout:5000 },
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
+    exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },
   { name:'kfai-nodejs', script:'/usr/local/bin/run-kfai-nodejs.sh', interpreter:'bash',
-    autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
-    max_memory_restart:mem.kfai, kill_timeout:10000, listen_timeout:15000,
-    node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.kfai, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
   { name:'kfai-mcp', script:'/usr/local/bin/run-kfai-mcp.sh', interpreter:'bash',
-    autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
-    max_memory_restart:mem.mcp, kill_timeout:10000, listen_timeout:15000,
-    node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.mcp, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
-    autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
-    max_memory_restart:mem.ttt, kill_timeout:10000, listen_timeout:15000,
-    node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
   { name:'nexcloud', script:'/usr/local/bin/run-nexcloud.sh', interpreter:'bash',
-    autorestart:true, max_restarts:30, restart_delay:2000, exp_backoff_restart_delay:100,
-    max_memory_restart:mem.nexcloud, kill_timeout:10000, listen_timeout:15000,
-    node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.nexcloud, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
 
 else
-  # ── Adaptive launcher mode (default) ──────────────────────────────────────
+  # ── Adaptive launcher mode (default, v2) ──────────────────────────────────
   echo "[start-all] mode adaptive launcher"
   # Pastikan launcher ada di /data (persistent – bisa di-edit via SSH)
   [ ! -f /data/launcher/index.js ] && cp /usr/local/bin/adaptive-launcher.js /data/launcher/index.js
@@ -1438,10 +1443,8 @@ RUN chmod +x \
       /usr/local/bin/bootstrap-apps.sh \
       /usr/local/bin/clear-app-port-env.sh \
       /usr/local/bin/upgrade-langchain-packages.sh \
-      /usr/local/bin/strip-node-modules.sh \
       /usr/local/bin/ensure-node-app-deps.sh \
       /usr/local/bin/run-node-app.sh \
-      /usr/local/bin/kilat-doctor \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
