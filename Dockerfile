@@ -985,6 +985,17 @@ kilat run test.js 2>&1 | sed 's/^/  /'
 cd - >/dev/null
 rm -rf "$TEST_DIR"
 
+printf "\n${C}== Hybrid Mode (node_modules fallback) per-app ==${N}\n"
+for app_dir in /data/apps/*/; do
+  [ -d "$app_dir" ] || continue
+  app_name=$(basename "$app_dir")
+  if [ -d "$app_dir/node_modules" ] && [ -f "$app_dir/node_modules/.kilat-managed" ]; then
+    NM_COUNT=$(find "$app_dir/node_modules" -mindepth 1 -maxdepth 1 -type d ! -name '.kilat-managed' 2>/dev/null | wc -l)
+    NM_SIZE=$(du -sh "$app_dir/node_modules" 2>/dev/null | cut -f1)
+    printf "  ${G}✓${N} %s: %s paket di node_modules/ (%s) — fallback untuk yang gagal di cache Kilat\n" "$app_name" "$NM_COUNT" "$NM_SIZE"
+  fi
+done
+
 printf "\n${C}== Apps opt-in Kilat ==${N}\n"
 for app_dir in /data/apps/*/; do
   [ -d "$app_dir" ] || continue
@@ -1157,7 +1168,8 @@ install_subdeps() {
       const deps = p.dependencies || {};
       const out = [];
       for (const [n, v] of Object.entries(deps)) out.push(n + "\t" + (v || ""));
-      process.stdout.write(out.join("\n"));
+      // Trailing newline agar loop while IFS=$'"'"'\t'"'"' read akurat
+      process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : ""));
     } catch (e) { /* ignore */ }
   ' "$pj" 2>/dev/null)
   [ -z "$subs" ] && return 0
@@ -1183,7 +1195,8 @@ node -e '
     if (!name) continue;
     out.push(name + "\t" + String(raw || ""));
   }
-  process.stdout.write(out.join("\n"));
+  // Tambah newline trailing agar wc -l akurat
+  process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : ""));
 ' > "$DEPS_FILE" 2>/dev/null || true
 
 if [ ! -s "$DEPS_FILE" ]; then
@@ -1197,12 +1210,28 @@ echo "[$APP_NAME] pasang $TOTAL deps ke cache Kilat ($KILAT_CACHE) via npm pack.
 
 FAIL_COUNT=0
 OK_COUNT=0
+FAILED_SPECS=()   # array "name@ver" untuk package yang gagal di cache Kilat
 while IFS=$'\t' read -r pkg_name pkg_ver; do
   [ -z "$pkg_name" ] && continue
   if install_pkg_to_kilat_cache "$pkg_name" "$pkg_ver"; then
     OK_COUNT=$((OK_COUNT+1))
   else
     FAIL_COUNT=$((FAIL_COUNT+1))
+    # Simpan spec untuk npm install ke node_modules lokal
+    if [ -n "$pkg_ver" ]; then
+      # Strip prefix versi
+      local_v="${pkg_ver#^}"; local_v="${local_v#~}"; local_v="${local_v#>=}"
+      local_v="${local_v#<=}"; local_v="${local_v#>}"; local_v="${local_v#<}"
+      local_v="${local_v#v}"; local_v="${local_v#=}"; local_v="$(echo "$local_v" | tr -d ' ')"
+      if [ -n "$local_v" ] && [ "$local_v" != "latest" ] && \
+         ! echo "$local_v" | grep -qE '^(file:|link:|workspace:|git\+|github:|https?:|/|\.)'; then
+        FAILED_SPECS+=("${pkg_name}@${local_v}")
+      else
+        FAILED_SPECS+=("$pkg_name")
+      fi
+    else
+      FAILED_SPECS+=("$pkg_name")
+    fi
   fi
 done < "$DEPS_FILE"
 
@@ -1210,15 +1239,118 @@ rm -f "$DEPS_FILE"
 
 echo "[$APP_NAME] ============================================"
 echo "[$APP_NAME] Kilat deps summary: $OK_COUNT OK, $FAIL_COUNT gagal dari $TOTAL total"
-if [ "$FAIL_COUNT" -gt 0 ]; then
-  echo "[$APP_NAME] ⚠ $FAIL_COUNT paket gagal. App mungkin error saat require()."
-  echo "[$APP_NAME] Tips: cek log di atas, pasang manual via SSH:"
-  echo "[$APP_NAME]   cd $APP_DIR && kilat add <pkg>@<ver>"
-  echo "[$APP_NAME] atau pakai Node.js (set USE_KILAT=false)."
-else
-  echo "[$APP_NAME] ✓ semua deps terpasang ke cache Kilat."
+
+# ── Fallback: install package yang gagal ke node_modules/ lokal ──────────────
+# Kenapa ini aman:
+#   Kilat (Goja CommonJS resolver) cek cache ~/.kilat/packages/ DULU,
+#   kalau tidak ketemu lanjut ke algoritma Node resolution standar:
+#   cari node_modules/ di direktori ini dan parent-nya.
+#   Jadi require('pkg-sukses') → cache Kilat (hemat storage),
+#       require('pkg-gagal')  → node_modules/ lokal (tetap jalan).
+if [ "$FAIL_COUNT" -gt 0 ] && [ "${#FAILED_SPECS[@]}" -gt 0 ]; then
+  echo "[$APP_NAME] ↳ install $FAIL_COUNT paket gagal ke node_modules/ lokal (hybrid mode)..."
+  # Bersihkan node_modules lama dulu kalau ada (yang asli, bukan dari zip)
+  if [ -d node_modules ] && [ ! -f node_modules/.kilat-managed ]; then
+    echo "[$APP_NAME]   node_modules/ lama ditemukan, biarkan (mungkin dari node_modules.zip)"
+  fi
+  mkdir -p node_modules
+  touch node_modules/.kilat-managed  # marker: node_modules ini di-manage ensure-kilat-deps
+
+  # Install SATU PER SATU di direktori temporary — kalau install langsung di app
+  # dir, npm akan resolve SEMUA deps di package.json app (termasuk yang invalid),
+  # sehingga install gagal total. Dengan temp dir + package.json minimal yang
+  # hanya berisi paket yang sedang diinstall, install selalu atomic per-paket.
+  INSTALLED=0
+  STILL_FAIL=0
+  NM_TMP="$(mktemp -d)"
+  for spec in "${FAILED_SPECS[@]}"; do
+    p_name="${spec%@*}"
+    [ "$p_name" = "$spec" ] && p_name="$spec"
+    # Skip kalau sudah ada di node_modules app (dari zip / cache lama)
+    if [ -d "node_modules/$p_name" ] && [ -f "node_modules/$p_name/package.json" ]; then
+      echo "[$APP_NAME]   ✓ $p_name sudah ada di node_modules/ (skip)"
+      INSTALLED=$((INSTALLED+1))
+      continue
+    fi
+
+    # Bersihkan temp dir
+    rm -rf "$NM_TMP"/*; mkdir -p "$NM_TMP"
+    # Buat package.json minimal yang hanya berisi spec ini
+    node -e '
+      const fs = require("fs");
+      const spec = process.argv[1];
+      const atIdx = spec.lastIndexOf("@");
+      const name = atIdx > 0 ? spec.slice(0, atIdx) : spec;
+      const ver  = atIdx > 0 ? spec.slice(atIdx + 1) : "latest";
+      const pkg = {
+        name: "kilat-fallback-tmp",
+        version: "0.0.0",
+        private: true,
+        dependencies: { [name]: ver.startsWith("^") || ver.startsWith("~") ? ver : "^" + ver }
+      };
+      fs.writeFileSync(process.argv[2] + "/package.json", JSON.stringify(pkg, null, 2));
+    ' "$spec" "$NM_TMP" 2>/dev/null
+
+    # npm install di temp dir
+    if (cd "$NM_TMP" && npm install --no-audit --no-fund --no-package-lock \
+         --omit=dev --loglevel=error --prefer-offline 2>&1) | \
+         grep -vE '^npm warn|^$' | sed "s/^/[$APP_NAME]   /"; then
+      # Copy hasil ke node_modules app
+      if [ -d "$NM_TMP/node_modules/$p_name" ]; then
+        mkdir -p "node_modules/$p_name"
+        cp -a "$NM_TMP/node_modules/$p_name/." "node_modules/$p_name/" 2>/dev/null || \
+          cp -r "$NM_TMP/node_modules/$p_name/." "node_modules/$p_name/" 2>/dev/null
+        # Copy juga sub-deps-nya ke node_modules app
+        for sub in "$NM_TMP/node_modules/"*; do
+          [ -d "$sub" ] || continue
+          sub_name=$(basename "$sub")
+          [ "$sub_name" = "$p_name" ] && continue
+          [ "$sub_name" = ".package-lock" ] && continue
+          [ -d "node_modules/$sub_name" ] && continue
+          mkdir -p "node_modules/$sub_name"
+          cp -a "$sub/." "node_modules/$sub_name/" 2>/dev/null || \
+            cp -r "$sub/." "node_modules/$sub_name/" 2>/dev/null
+        done
+        echo "[$APP_NAME]   ✓ $p_name → node_modules/ (+ sub-deps)"
+        INSTALLED=$((INSTALLED+1))
+      else
+        echo "[$APP_NAME]   ⚠ $p_name: npm install exit 0 tapi folder tidak ada"
+        STILL_FAIL=$((STILL_FAIL+1))
+      fi
+    else
+      echo "[$APP_NAME]   ⚠ $p_name: npm install gagal (mungkin tidak ada di registry)"
+      STILL_FAIL=$((STILL_FAIL+1))
+    fi
+    # Bersihkan temp dir untuk iterasi berikutnya
+    rm -rf "$NM_TMP"/*
+  done
+  rm -rf "$NM_TMP"
+
+  echo "[$APP_NAME] ============================================"
+  echo "[$APP_NAME] node_modules fallback: $INSTALLED OK, $STILL_FAIL masih gagal dari $FAIL_COUNT"
+
+  # Cleanup npm cache (hemat storage)
+  npm cache clean --force 2>/dev/null || true
 fi
-echo "[$APP_NAME] cache: $KILAT_CACHE ($(find "$KILAT_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) paket, $(du -sh "$KILAT_CACHE" 2>/dev/null | cut -f1))"
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  if [ -n "${INSTALLED:-0}" ] && [ "$INSTALLED" -gt 0 ]; then
+    echo "[$APP_NAME] ℹ hybrid mode: cache Kilat ($OK_COUNT paket) + node_modules/ ($INSTALLED paket fallback)"
+    [ "$STILL_FAIL" -gt 0 ] && \
+      echo "[$APP_NAME] ⚠ $STILL_FAIL paket tidak bisa diinstall sama sekali — app akan error saat require() paket ini"
+  else
+    echo "[$APP_NAME] ⚠ $FAIL_COUNT paket gagal di cache Kilat DAN node_modules fallback"
+    echo "[$APP_NAME]   App akan error saat require() paket-paket ini."
+  fi
+else
+  echo "[$APP_NAME] ✓ semua deps terpasang ke cache Kilat (pure Kilat mode, hemat storage maksimal)."
+fi
+
+# Hitung total storage yang dipakai
+KILAT_SIZE=$(du -sh "$KILAT_CACHE" 2>/dev/null | cut -f1)
+NM_SIZE="(none)"
+[ -d node_modules ] && NM_SIZE=$(du -sh node_modules 2>/dev/null | cut -f1)
+echo "[$APP_NAME] storage: kilat-cache=$KILAT_SIZE, node_modules=$NM_SIZE"
 exit 0
 SCRIPT
 
@@ -1290,6 +1422,10 @@ fi
 # Kilat auto-load .env di direktori kerja
 echo "[$APP_NAME] start (Kilat v$(kilat --version 2>/dev/null || echo '?')): kilat run $ENTRY"
 echo "[$APP_NAME] cache: $KILAT_PACKAGES_DIR ($(find "$KILAT_PACKAGES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) paket tercache)"
+if [ -d node_modules ] && [ -f node_modules/.kilat-managed ]; then
+  NM_PKGS=$(find node_modules -mindepth 1 -maxdepth 1 -type d ! -name '.kilat-managed' 2>/dev/null | wc -l)
+  echo "[$APP_NAME] hybrid mode aktif: $NM_PKGS paket di node_modules/ (fallback untuk yang gagal di cache Kilat)"
+fi
 
 exec /usr/local/bin/clear-app-port-env.sh kilat run "$ENTRY"
 SCRIPT
