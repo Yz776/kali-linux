@@ -1,6 +1,33 @@
 FROM kalilinux/kali-rolling
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# KILAT INTEGRATION (https://jolt.shannyie.web.id/)
+# ───────────────────────────────────────────────────────────────────────────────
+# Kilat adalah runtime JavaScript ultra-ringan berbasis Go (engine Goja) untuk
+# Termux & Linux. Binary tunggal ±5-10MB, tanpa V8 engine.
+#
+# Keuntungan storage:
+#   • Tidak ada node_modules duplikat per-proyek (yang biasanya ratusan MB).
+#   • Semua package disimpan terpusat di /data/root/.kilat/packages/ — sekali
+#     install, semua app pakai bersama (mirip pnpm store tapi lebih ringan).
+#   • Cocok untuk app Node.js sederhana yang hanya butuh CommonJS + fs/os/net/console.
+#
+# Cara pakai per-app (opt-in, default TIDAK aktif):
+#   1. ENV per-app di docker run:
+#        -e USE_KILAT=true -e KILAT_ENABLED_APPS=ttt,nexcloud
+#   2. Atau tambahkan field di package.json app:
+#        { "name": "ttt", "kilat": true, ... }
+#   3. App tetap pakai Node.js jika package-butuh-native (esbuild, sharp, canvas,
+#      langchain, dll). Deteksi otomatis: jika opt-in tapi binary kilat tidak ada
+#      atau app memakai native deps, fallback ke Node.js.
+#
+# Cara cek di container:
+#   kilat --version
+#   kilat run hello.js
+#   kilat add lodash
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -29,6 +56,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PM2_HOME=/data/root/.pm2 \
     NPM_CONFIG_CACHE=/data/root/.npm \
     PATH="/data/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    # ── Kilat (https://jolt.shannyie.web.id/) ──────────────────────────────────
+    # Runtime JavaScript ringan berbasis Go (engine Goja) yang menggantikan node_modules
+    # per-proyek dengan direktori paket terpusat. Pakai untuk app Node.js sederhana
+    # agar tidak membengkakkan storage.
+    KILAT_VERSION=v0.3.0 \
+    KILAT_HOME=/data/root/.kilat \
+    KILAT_PACKAGES_DIR=/data/root/.kilat/packages \
+    # Set USE_KILAT=true per-app (di env run-kfai-nodejs.sh dll) untuk pakai Kilat
+    USE_KILAT=false \
+    # Daftar app yang boleh pakai Kilat (CSV). Default: kosong = per-app opt-in via ENV.
+    KILAT_ENABLED_APPS="" \
     # Git
     GIT_TERMINAL_PROMPT=0 \
     GIT_HTTP_LOW_SPEED_LIMIT=1000 \
@@ -138,6 +176,31 @@ RUN set -eux; \
     node -v; npm -v; pm2 -v; \
     apt-get autoremove -y; apt-get clean; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 3.5 – Kilat (https://jolt.shannyie.web.id/)
+# Runtime JavaScript ultra-ringan berbasis Go (engine Goja) untuk Termux & Linux.
+# Binary tunggal ±5-10MB, TANPA V8 engine, TANPA node_modules per-proyek.
+# Package di-resolve dari cache terpusat ~/.kilat/packages/ sehingga hemat storage.
+# Cocok untuk app Node.js yang hanya pakai CommonJS + fs/os/net/console.
+# ═══════════════════════════════════════════════════════════════════════════════
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64|amd64)  KILAT_ARCH="amd64" ;; \
+      aarch64|arm64) KILAT_ARCH="arm64" ;; \
+      armv7l|armhf)  KILAT_ARCH="armv7" ;; \
+      *) echo "Kilat: arsitektur $ARCH belum didukung, skip."; exit 0 ;; \
+    esac; \
+    OS_KILAT="$(uname -s | tr '[:upper:]' '[:lower:]')"; \
+    KILAT_URL="https://github.com/IHx-cmyk/kilat/releases/download/${KILAT_VERSION}/kilat-${OS_KILAT}-${KILAT_ARCH}"; \
+    echo "Download Kilat: $KILAT_URL"; \
+    curl -fsSL --retry 3 -o /usr/local/bin/kilat "$KILAT_URL" \
+      || { echo "WARN: gagal download Kilat (mungkin release ${KILAT_VERSION} belum ada untuk ${OS_KILAT}/${KILAT_ARCH}). Skip."; exit 0; }; \
+    chmod +x /usr/local/bin/kilat; \
+    /usr/local/bin/kilat --version 2>/dev/null || echo "Kilat binary terpasang tapi --version gagal."; \
+    mkdir -p /data/root/.kilat/packages; \
+    chmod 755 /data/root/.kilat
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 – Direktori + SSH host keys pre-generated
@@ -791,6 +854,12 @@ echo "[$APP_NAME] deps siap."
 SCRIPT
 
 # ─── run-node-app.sh ──────────────────────────────────────────────────────────
+# Router runtime: pilih Kilat atau Node.js berdasarkan opt-in.
+# Kilat dipakai jika SALAH SATU kondisi true:
+#   1. ENV USE_KILAT=true (di-set per-app di run-<app>.sh), atau
+#   2. package.json punya field "kilat": true, atau
+#   3. APP_NAME tercatat di ENV KILAT_ENABLED_APPS (CSV, mis. "ttt,nexcloud")
+# Jika kilat binary tidak ada / opt-in tidak aktif → tetap pakai Node.js.
 RUN cat > /usr/local/bin/run-node-app.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -802,6 +871,28 @@ NODE_EXTRA="${7:-}"
 cd "$APP_DIR"
 [ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
 
+# ── Deteksi opt-in Kilat ─────────────────────────────────────────────────────
+use_kilat=false
+if [ "${USE_KILAT:-false}" = "true" ]; then
+  use_kilat=true
+elif command -v node >/dev/null 2>&1 && \
+     node -e 'const p=require("./package.json");process.exit(p.kilat===true?0:1)' 2>/dev/null; then
+  use_kilat=true
+elif [ -n "${KILAT_ENABLED_APPS:-}" ] && \
+     echo ",${KILAT_ENABLED_APPS}," | grep -q ",${APP_NAME},"; then
+  use_kilat=true
+fi
+
+if [ "$use_kilat" = "true" ]; then
+  if command -v kilat >/dev/null 2>&1; then
+    echo "[$APP_NAME] opt-in Kilat aktif → jalankan via Kilat (hemat storage, tanpa node_modules lokal)."
+    exec /usr/local/bin/run-kilat-app.sh "$APP_NAME" "$APP_DIR" "$ENTRY_DEFAULT"
+  else
+    echo "[$APP_NAME] opt-in Kilat aktif tapi binary kilat tidak tersedia → fallback Node.js."
+  fi
+fi
+
+# ── Mode Node.js (default, behavior lama) ────────────────────────────────────
 /usr/local/bin/ensure-node-app-deps.sh "$APP_NAME" "$APP_DIR" "$ZIP_FILE" "$USE_ZIP" "$SKIP_NPM"
 
 ENTRY="$ENTRY_DEFAULT"
@@ -818,6 +909,92 @@ fi
 
 echo "[$APP_NAME] start: node $NODE_EXTRA $ENTRY"
 exec /usr/local/bin/clear-app-port-env.sh node $NODE_EXTRA "$ENTRY"
+SCRIPT
+
+# ─── ensure-kilat-deps.sh ─────────────────────────────────────────────────────
+# Pasang dependencies app ke cache Kilat terpusat (~/.kilat/packages/) dengan
+# `kilat add`. Tidak membuat node_modules lokal — itulah inti penghemat storage.
+# Dipanggil oleh run-node-app.sh ketika USE_KILAT=true.
+RUN cat > /usr/local/bin/ensure-kilat-deps.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="$1"; APP_DIR="$2"
+cd "$APP_DIR"
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." && exit 1
+
+if ! command -v kilat >/dev/null 2>&1; then
+  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js."
+  exit 2
+fi
+
+# Pastikan direktori cache Kilat ada
+mkdir -p "${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
+
+# Kilat v0.3.0 belum support install dari package.json sekaligus; kita iterasi
+# dependencies & devDependencies (hanya prod deps yang dipasang).
+DEPS=$(node -e '
+  const p = require("./package.json");
+  const out = [];
+  for (const k of ["dependencies"]) {
+    if (!p[k]) continue;
+    for (const [name, ver] of Object.entries(p[k])) {
+      // Kilat menerima format name@version
+      out.push(ver && ver !== "latest" ? `${name}@${ver.replace(/^[^0-9]/, "")}` : name);
+    }
+  }
+  console.log(out.join("\n"));
+' 2>/dev/null || echo "")
+
+if [ -z "$DEPS" ]; then
+  echo "[$APP_NAME] tidak ada dependencies untuk Kilat."
+  exit 0
+fi
+
+echo "[$APP_NAME] pasang deps ke cache Kilat terpusat..."
+echo "$DEPS" | while IFS= read -r dep; do
+  [ -z "$dep" ] && continue
+  echo "[$APP_NAME] kilat add $dep"
+  kilat add "$dep" 2>&1 | sed "s/^/[$APP_NAME] /" || \
+    echo "[$APP_NAME] WARN: kilat add $dep gagal."
+done
+echo "[$APP_NAME] deps Kilat siap (cache terpusat, tanpa node_modules lokal)."
+SCRIPT
+
+# ─── run-kilat-app.sh ─────────────────────────────────────────────────────────
+# Jalankan app Node.js dengan Kilat runtime (binary tunggal Go+Goja, tanpa V8).
+# Dipanggil oleh run-node-app.sh ketika USE_KILAT=true & app opt-in.
+# Aturan opt-in:
+#   - ENV USE_KILAT=true per-app (di-set di run-<app>.sh), ATAU
+#   - package.json memiliki field "kilat": true, ATAU
+#   - nama app tercatat di ENV KILAT_ENABLED_APPS (CSV, mis. "ttt,nexcloud")
+RUN cat > /usr/local/bin/run-kilat-app.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="$1"; APP_DIR="$2"; ENTRY_DEFAULT="${3:-server.js}"
+
+if ! command -v kilat >/dev/null 2>&1; then
+  echo "[$APP_NAME] kilat tidak tersedia, fallback ke Node.js." >&2
+  exit 2
+fi
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && exit 1
+cd "$APP_DIR"
+
+# Pasang deps ke cache Kilat (skip jika gagal → tetap coba jalan)
+/usr/local/bin/ensure-kilat-deps.sh "$APP_NAME" "$APP_DIR" 2>&1 | sed "s/^/[$APP_NAME] /" || true
+
+ENTRY="$ENTRY_DEFAULT"
+if [ ! -f "$ENTRY" ]; then
+  for f in server.js server-langchain.js index.js; do
+    [ -f "$f" ] && ENTRY="$f" && break
+  done
+fi
+if [ ! -f "$ENTRY" ]; then
+  echo "[$APP_NAME] entry point tidak ditemukan." >&2; exit 1
+fi
+
+# Kilat auto-load .env di direktori kerja
+echo "[$APP_NAME] start (Kilat): kilat run $ENTRY"
+exec /usr/local/bin/clear-app-port-env.sh kilat run "$ENTRY"
 SCRIPT
 
 # ─── run-kfai-nodejs.sh ───────────────────────────────────────────────────────
@@ -892,8 +1069,9 @@ RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 set +e
 ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
 ulimit -u 65535   2>/dev/null || true
-mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/tmp
+mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/root/.kilat/packages /data/tmp
 chmod 700 /data/root /data/root/.pm2 /data/root/.npm 2>/dev/null || true
+chmod 755 /data/root/.kilat /data/root/.kilat/packages 2>/dev/null || true
 chmod 1777 /tmp /data/tmp 2>/dev/null || true
 npm config set prefer-offline true --global >/dev/null 2>&1 || true
 npm config set audit false --global         >/dev/null 2>&1 || true
@@ -929,6 +1107,21 @@ for pat in "adaptive-launcher" pm2 "node.*server" "node.*kfai" "node.*ttt" "node
 done
 printf "\n${C}== DNS cache (nscd) ==${R}\n"
 nscd -g 2>/dev/null | grep -E 'cache hit|request' | head -n 10 || echo "  nscd tidak aktif"
+printf "\n${C}== Kilat (runtime JS ringan) ==${R}\n"
+if command -v kilat >/dev/null 2>&1; then
+  kilat --version 2>/dev/null || echo "  kilat binary ada tapi --version gagal"
+  KILAT_DIR="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
+  if [ -d "$KILAT_DIR" ]; then
+    PKGS=$(find "$KILAT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    SIZE=$(du -sh "$KILAT_DIR" 2>/dev/null | cut -f1)
+    echo "  Cache: $KILAT_DIR ($PKGS paket, $SIZE)"
+  else
+    echo "  Cache dir belum dibuat: $KILAT_DIR"
+  fi
+  echo "  KILAT_ENABLED_APPS=${KILAT_ENABLED_APPS:-<kosong>}  USE_KILAT=${USE_KILAT:-false}"
+else
+  echo "  kilat binary tidak terpasang di image ini"
+fi
 printf "\n${C}== Nice values ==${R}\n"
 ps -eo pid,nice,comm --sort=nice | grep -E 'node|cloudflared' | head -n 10 || true
 SCRIPT
@@ -940,8 +1133,10 @@ set -euo pipefail
 
 # ── 0. Direktori ───────────────────────────────────────────────────────────
 mkdir -p /data/root /data/ssh /data/apps /data/bin /data/launcher \
+         /data/root/.kilat/packages \
          /run/sshd /data/root/.pm2 /data/root/.npm /data/tmp
 chmod 700 /data/root /data/ssh
+chmod 755 /data/root/.kilat /data/root/.kilat/packages 2>/dev/null || true
 chmod 1777 /data/tmp /tmp || true
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
@@ -998,6 +1193,9 @@ alias psa='ps aux --sort=-%mem | head -n 20'
 alias ports='ss -lntup'
 alias cls='clear'
 alias lmode='echo $LAUNCHER_MODE'
+alias kil='kilat --version 2>/dev/null && echo "Usage: kilat run <file.js> | kilat add <pkg>"'
+alias krun='kilat run'
+alias kadd='kilat add'
 fastfetch 2>/dev/null || true
 echo
 echo "  /data (persistent) | /root → /data/root"
@@ -1005,6 +1203,9 @@ echo "  LAUNCHER_MODE=${LAUNCHER_MODE:-adaptive}  |  kstatus"
 echo "  Edit launcher: nano /data/launcher/index.js"
 echo
 node -v; npm -v; cloudflared --version 2>/dev/null; echo
+command -v kilat >/dev/null 2>&1 && kilat --version 2>/dev/null || echo "(kilat tidak terpasang di image ini)"
+echo "  Kilat runtime (hemat storage): set USE_KILAT=true atau \"kilat\":true di package.json"
+echo
 BASHRC
 
 # ── 7. Tunggu optimasi selesai ─────────────────────────────────────────────
@@ -1086,7 +1287,9 @@ RUN chmod +x \
       /usr/local/bin/clear-app-port-env.sh \
       /usr/local/bin/upgrade-langchain-packages.sh \
       /usr/local/bin/ensure-node-app-deps.sh \
+      /usr/local/bin/ensure-kilat-deps.sh \
       /usr/local/bin/run-node-app.sh \
+      /usr/local/bin/run-kilat-app.sh \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
