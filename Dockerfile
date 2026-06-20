@@ -886,7 +886,16 @@ fi
 if [ "$use_kilat" = "true" ]; then
   if command -v kilat >/dev/null 2>&1; then
     echo "[$APP_NAME] opt-in Kilat aktif → jalankan via Kilat (hemat storage, tanpa node_modules lokal)."
-    exec /usr/local/bin/run-kilat-app.sh "$APP_NAME" "$APP_DIR" "$ENTRY_DEFAULT"
+    # run-kilat-app.sh exit code:
+    #   0 = sukses (exec kilat, tidak return)
+    #   2 = minta fallback ke Node.js (kilat binary hilang, ESM, atau masalah lain)
+    #   lain = error fatal
+    /usr/local/bin/run-kilat-app.sh "$APP_NAME" "$APP_DIR" "$ENTRY_DEFAULT"
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+      exit "$rc"
+    fi
+    echo "[$APP_NAME] fallback ke Node.js (Kilat exit $rc)."
   else
     echo "[$APP_NAME] opt-in Kilat aktif tapi binary kilat tidak tersedia → fallback Node.js."
   fi
@@ -911,53 +920,198 @@ echo "[$APP_NAME] start: node $NODE_EXTRA $ENTRY"
 exec /usr/local/bin/clear-app-port-env.sh node $NODE_EXTRA "$ENTRY"
 SCRIPT
 
+# ─── kilat-doctor.sh ──────────────────────────────────────────────────────────
+# Diagnostic helper: cek instalasi Kilat & cache packages.
+# Jalankan via SSH: kilat-doctor
+RUN cat > /usr/local/bin/kilat-doctor <<'SCRIPT'
+#!/usr/bin/env bash
+# kilat-doctor — cek instalasi Kilat dan cache packages
+set +e
+C='\033[1;36m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'; N='\033[0m'
+
+printf "${C}== Kilat Binary ==${N}\n"
+if command -v kilat >/dev/null 2>&1; then
+  printf "  ${G}✓${N} kilat: $(command -v kilat)\n"
+  kilat --version 2>&1 | sed 's/^/  /'
+else
+  printf "  ${R}✗ kilat tidak ditemukan di PATH${N}\n"
+  echo "  PATH=$PATH"
+  exit 1
+fi
+
+printf "\n${C}== Environment ==${N}\n"
+echo "  KILAT_HOME=${KILAT_HOME:-<unset, default /data/root/.kilat>}"
+echo "  KILAT_PACKAGES_DIR=${KILAT_PACKAGES_DIR:-<unset, default \$KILAT_HOME/packages>}"
+echo "  USE_KILAT=${USE_KILAT:-false}"
+echo "  KILAT_ENABLED_APPS=${KILAT_ENABLED_APPS:-<kosong>}"
+
+# KILAT_PACKAGES_DIR actual (resolve default)
+KH="${KILAT_HOME:-/data/root/.kilat}"
+KPD="${KILAT_PACKAGES_DIR:-$KH/packages}"
+
+printf "\n${C}== Cache Directory ==${N}\n"
+echo "  Lokasi: $KPD"
+if [ -d "$KPD" ]; then
+  PKGS=$(find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+  SIZE=$(du -sh "$KPD" 2>/dev/null | cut -f1)
+  printf "  ${G}✓${N} ada, $PKGS paket, $SIZE\n"
+  if [ "$PKGS" -gt 0 ]; then
+    echo "  Daftar paket:"
+    find "$KPD" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | sed 's|^|    - |' | head -30
+    [ "$PKGS" -gt 30 ] && echo "    ... ($(($PKGS - 30)) paket lagi)"
+  fi
+else
+  printf "  ${Y}⚠ cache dir belum dibuat${N}\n"
+fi
+
+printf "\n${C}== Test require() ==${N}\n"
+TEST_DIR=$(mktemp -d)
+cat > "$TEST_DIR/test.js" <<'JS'
+try {
+  const lodash = require('lodash');
+  console.log('  ✓ lodash OK, version:', lodash.VERSION);
+} catch (e) {
+  console.log('  ✗ lodash gagal:', e.message);
+}
+try {
+  const dotenv = require('dotenv');
+  console.log('  ✓ dotenv OK');
+} catch (e) {
+  console.log('  ✗ dotenv gagal:', e.message);
+}
+JS
+cd "$TEST_DIR"
+kilat run test.js 2>&1 | sed 's/^/  /'
+cd - >/dev/null
+rm -rf "$TEST_DIR"
+
+printf "\n${C}== Apps opt-in Kilat ==${N}\n"
+for app_dir in /data/apps/*/; do
+  [ -d "$app_dir" ] || continue
+  app_name=$(basename "$app_dir")
+  [ -f "$app_dir/package.json" ] || continue
+  if node -e 'const p=require(process.argv[1]+"/package.json");process.exit(p.kilat===true?0:1)' "$app_dir" 2>/dev/null; then
+    printf "  ${G}✓${N} %s (package.json: kilat=true)\n" "$app_name"
+  elif echo ",${KILAT_ENABLED_APPS:-}," | grep -q ",$app_name,"; then
+    printf "  ${G}✓${N} %s (KILAT_ENABLED_APPS)\n" "$app_name"
+  else
+    printf "  ${Y}○${N} %s (default Node.js)\n" "$app_name"
+  fi
+done
+
+echo
+echo "Tips:"
+echo "  - Pasang paket manual: kilat add <pkg>"
+echo "  - Hapus cache: rm -rf $KPD/*"
+echo "  - Test app: cd /data/apps/<app> && kilat run server.js"
+SCRIPT
+
 # ─── ensure-kilat-deps.sh ─────────────────────────────────────────────────────
 # Pasang dependencies app ke cache Kilat terpusat (~/.kilat/packages/) dengan
 # `kilat add`. Tidak membuat node_modules lokal — itulah inti penghemat storage.
 # Dipanggil oleh run-node-app.sh ketika USE_KILAT=true.
 RUN cat > /usr/local/bin/ensure-kilat-deps.sh <<'SCRIPT'
 #!/usr/bin/env bash
-set -euo pipefail
+# ensure-kilat-deps.sh — pasang dependencies app ke cache Kilat terpusat.
+#
+# Mengapa script ini perlu:
+#   Kilat v0.3.0 TIDAK punya `kilat install` (bulk install dari package.json).
+#   Kita harus iterasi `dependencies` satu per satu dengan `kilat add <pkg>@<ver>`.
+#   Cache Kilat disimpan di $KILAT_PACKAGES_DIR (default /data/root/.kilat/packages)
+#   dan persistent — sekali di-add, app lain bisa langsung pakai.
+#
+# Robustness:
+#   - Parser JSON pakai node (sudah ada di image), bukan jq.
+#   - Strip prefix versi (^, ~, >=, v) supaya Kilat menerima.
+#   - Skip "latest", "workspace:*", "file:", "git+", "link:" — tidak didukung Kilat.
+#   - Retry 2x per package kalau transient network error.
+#   - Exit 0 walau ada yang gagal — app tetap dicoba jalan (Kilat akan error
+#     spesifik per require() yang gagal, lebih informatif daripada crash global).
+set -uo pipefail
 APP_NAME="$1"; APP_DIR="$2"
-cd "$APP_DIR"
-[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." && exit 1
+cd "$APP_DIR" || { echo "[$APP_NAME] tidak bisa cd ke $APP_DIR" >&2; exit 1; }
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && exit 1
 
 if ! command -v kilat >/dev/null 2>&1; then
-  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js."
+  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js." >&2
   exit 2
 fi
 
 # Pastikan direktori cache Kilat ada
-mkdir -p "${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
+KILAT_CACHE="${KILAT_PACKAGES_DIR:-/data/root/.kilat/packages}"
+mkdir -p "$KILAT_CACHE"
+export KILAT_HOME="${KILAT_HOME:-/data/root/.kilat}"
 
-# Kilat v0.3.0 belum support install dari package.json sekaligus; kita iterasi
-# dependencies & devDependencies (hanya prod deps yang dipasang).
-DEPS=$(node -e '
-  const p = require("./package.json");
+# Ekstrak dependencies (prod saja) dari package.json dengan parser node yang ketat.
+# Hanya kirim baris dengan format "name@version" atau "name".
+# Skip entry dengan versi: latest, file:, link:, workspace:, git+, github:, https:, /path
+DEPS_FILE="$(mktemp)"
+node -e '
+  const fs = require("fs");
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync("./package.json", "utf8")); }
+  catch (e) { process.stderr.write("parse package.json gagal: " + e.message + "\n"); process.exit(0); }
+  const deps = Object.assign({}, pkg.dependencies || {});
   const out = [];
-  for (const k of ["dependencies"]) {
-    if (!p[k]) continue;
-    for (const [name, ver] of Object.entries(p[k])) {
-      // Kilat menerima format name@version
-      out.push(ver && ver !== "latest" ? `${name}@${ver.replace(/^[^0-9]/, "")}` : name);
+  for (const [name, raw] of Object.entries(deps)) {
+    if (!name) continue;
+    const v = String(raw || "").trim();
+    if (!v) { out.push(name); continue; }
+    if (v.startsWith("file:") || v.startsWith("link:") || v.startsWith("workspace:")
+        || v.startsWith("git+") || v.startsWith("github:") || v.startsWith("http:")
+        || v.startsWith("https:") || v.startsWith("/") || v === "latest") {
+      // Pakai nama saja, biar Kilat ambil versi latest dari npm
+      out.push(name);
+      continue;
     }
+    // Strip prefix semver: ^ ~ >= <= > < = v
+    const clean = v.replace(/^[\^~>=<= ]+/, "").replace(/^v/, "");
+    out.push(clean ? name + "@" + clean : name);
   }
-  console.log(out.join("\n"));
-' 2>/dev/null || echo "")
+  process.stdout.write(out.join("\n"));
+' > "$DEPS_FILE" 2>/dev/null || true
 
-if [ -z "$DEPS" ]; then
-  echo "[$APP_NAME] tidak ada dependencies untuk Kilat."
+if [ ! -s "$DEPS_FILE" ]; then
+  echo "[$APP_NAME] tidak ada dependencies untuk Kilat (atau package.json tidak bisa diparse)."
+  rm -f "$DEPS_FILE"
   exit 0
 fi
 
-echo "[$APP_NAME] pasang deps ke cache Kilat terpusat..."
-echo "$DEPS" | while IFS= read -r dep; do
+echo "[$APP_NAME] pasang $(wc -l < "$DEPS_FILE") deps ke cache Kilat ($KILAT_CACHE)..."
+
+FAIL_COUNT=0
+while IFS= read -r dep; do
   [ -z "$dep" ] && continue
+  # Cek apakah package sudah ada di cache (skip jika sudah ada & valid)
+  PKG_NAME="${dep%@*}"
+  [ "$PKG_NAME" = "$dep" ] && PKG_NAME="$dep"
+  if [ -d "$KILAT_CACHE/$PKG_NAME" ] && [ -n "$(ls -A "$KILAT_CACHE/$PKG_NAME" 2>/dev/null)" ]; then
+    echo "[$APP_NAME] ✓ cache hit: $PKG_NAME (skip download)"
+    continue
+  fi
   echo "[$APP_NAME] kilat add $dep"
-  kilat add "$dep" 2>&1 | sed "s/^/[$APP_NAME] /" || \
-    echo "[$APP_NAME] WARN: kilat add $dep gagal."
-done
-echo "[$APP_NAME] deps Kilat siap (cache terpusat, tanpa node_modules lokal)."
+  OK=0
+  for attempt in 1 2; do
+    if kilat add "$dep" 2>&1 | sed "s/^/[$APP_NAME] /"; then
+      # Verifikasi: folder package harus muncul
+      if [ -d "$KILAT_CACHE/$PKG_NAME" ]; then
+        OK=1
+        break
+      fi
+    fi
+    [ "$attempt" -lt 2 ] && echo "[$APP_NAME] retry $dep (attempt $attempt/2)..." && sleep 1
+  done
+  [ "$OK" -ne 1 ] && { echo "[$APP_NAME] WARN: kilat add $dep gagal setelah retry."; FAIL_COUNT=$((FAIL_COUNT+1)); }
+done < "$DEPS_FILE"
+
+rm -f "$DEPS_FILE"
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  echo "[$APP_NAME] deps Kilat siap dengan $FAIL_COUNT paket gagal (app mungkin error saat require)."
+else
+  echo "[$APP_NAME] deps Kilat siap (cache terpusat, tanpa node_modules lokal)."
+fi
+exit 0
 SCRIPT
 
 # ─── run-kilat-app.sh ─────────────────────────────────────────────────────────
@@ -969,31 +1123,66 @@ SCRIPT
 #   - nama app tercatat di ENV KILAT_ENABLED_APPS (CSV, mis. "ttt,nexcloud")
 RUN cat > /usr/local/bin/run-kilat-app.sh <<'SCRIPT'
 #!/usr/bin/env bash
-set -euo pipefail
+# run-kilat-app.sh — jalankan app Node.js via Kilat runtime (Go+Goja, tanpa V8).
+# Dipanggil oleh run-node-app.sh ketika opt-in Kilat aktif.
+#
+# Aturan opt-in (salah satu):
+#   - ENV USE_KILAT=true per-app, ATAU
+#   - package.json punya field "kilat": true, ATAU
+#   - nama app tercatat di ENV KILAT_ENABLED_APPS (CSV)
+#
+# Env yang dihormati:
+#   KILAT_HOME           — root dir Kilat (default /data/root/.kilat)
+#   KILAT_PACKAGES_DIR   — lokasi cache packages (default $KILAT_HOME/packages)
+set -uo pipefail
 APP_NAME="$1"; APP_DIR="$2"; ENTRY_DEFAULT="${3:-server.js}"
 
 if ! command -v kilat >/dev/null 2>&1; then
-  echo "[$APP_NAME] kilat tidak tersedia, fallback ke Node.js." >&2
+  echo "[$APP_NAME] kilat binary tidak tersedia — fallback ke Node.js." >&2
   exit 2
 fi
-[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && exit 1
-cd "$APP_DIR"
 
-# Pasang deps ke cache Kilat (skip jika gagal → tetap coba jalan)
-/usr/local/bin/ensure-kilat-deps.sh "$APP_NAME" "$APP_DIR" 2>&1 | sed "s/^/[$APP_NAME] /" || true
+[ ! -d "$APP_DIR" ] && { echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2; exit 1; }
+cd "$APP_DIR" || { echo "[$APP_NAME] tidak bisa cd ke $APP_DIR" >&2; exit 1; }
+[ ! -f package.json ] && { echo "[$APP_NAME] package.json tidak ada di $APP_DIR" >&2; exit 1; }
 
+# Pastikan env Kilat konsisten dengan cache yang sudah diisi
+export KILAT_HOME="${KILAT_HOME:-/data/root/.kilat}"
+export KILAT_PACKAGES_DIR="${KILAT_PACKAGES_DIR:-$KILAT_HOME/packages}"
+mkdir -p "$KILAT_PACKAGES_DIR"
+
+# ── Pre-flight: pasang deps ke cache Kilat ─────────────────────────────────
+# Pastikan cache terisi SEBELUM `kilat run` — kalau tidak, kilat run langsung
+# error "package tidak tersedia" saat require() pertama.
+echo "[$APP_NAME] pre-flight: pasang deps Kilat..."
+if ! /usr/local/bin/ensure-kilat-deps.sh "$APP_NAME" "$APP_DIR"; then
+  echo "[$APP_NAME] ensure-kilat-deps gagal (kode $?). Tetap lanjut kilat run."
+fi
+
+# ── Resolve entry point ─────────────────────────────────────────────────────
 ENTRY="$ENTRY_DEFAULT"
 if [ ! -f "$ENTRY" ]; then
-  for f in server.js server-langchain.js index.js; do
+  for f in server.js server-langchain.js index.js app.js main.js; do
     [ -f "$f" ] && ENTRY="$f" && break
   done
 fi
 if [ ! -f "$ENTRY" ]; then
-  echo "[$APP_NAME] entry point tidak ditemukan." >&2; exit 1
+  echo "[$APP_NAME] entry point tidak ditemukan (dicari: $ENTRY_DEFAULT, server.js, index.js, app.js, main.js)." >&2
+  exit 1
+fi
+
+# ── Cek apakah entry point pakai sintaks yang tidak didukung Kilat ───────────
+# Kilat v0.3.0 hanya mendukung CommonJS (require/module.exports).
+# Kalau file pakai ESM (import/export), fallback ke Node.js.
+if grep -qE '^[[:space:]]*import\s+|^[[:space:]]*export\s+(default|const|function|class)\s' "$ENTRY" 2>/dev/null; then
+  echo "[$APP_NAME] $ENTRY memakai ES Modules (import/export). Kilat v0.3.0 belum support ESM → fallback Node.js." >&2
+  exit 2
 fi
 
 # Kilat auto-load .env di direktori kerja
-echo "[$APP_NAME] start (Kilat): kilat run $ENTRY"
+echo "[$APP_NAME] start (Kilat v$(kilat --version 2>/dev/null || echo '?')): kilat run $ENTRY"
+echo "[$APP_NAME] cache: $KILAT_PACKAGES_DIR ($(find "$KILAT_PACKAGES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) paket tercache)"
+
 exec /usr/local/bin/clear-app-port-env.sh kilat run "$ENTRY"
 SCRIPT
 
@@ -1196,6 +1385,7 @@ alias lmode='echo $LAUNCHER_MODE'
 alias kil='kilat --version 2>/dev/null && echo "Usage: kilat run <file.js> | kilat add <pkg>"'
 alias krun='kilat run'
 alias kadd='kilat add'
+alias kd='kilat-doctor'
 fastfetch 2>/dev/null || true
 echo
 echo "  /data (persistent) | /root → /data/root"
@@ -1290,6 +1480,7 @@ RUN chmod +x \
       /usr/local/bin/ensure-kilat-deps.sh \
       /usr/local/bin/run-node-app.sh \
       /usr/local/bin/run-kilat-app.sh \
+      /usr/local/bin/kilat-doctor \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
