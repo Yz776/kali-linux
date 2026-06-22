@@ -8,6 +8,7 @@ FROM kalilinux/kali-rolling
 #   • NODE_OPTIONS ditambah --max-semi-space-size=64 (GC lebih efisien)
 #   • --gc-interval=100 DIHAPUS dari NODE_OPTIONS (tidak diizinkan Node.js di NODE_OPTIONS)
 #   • PATH tetap, untuk compat dengan script existing
+#   • v3.1 — tambah aplikasi "catur" (https://github.com/Yz776/catur.git)
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Jakarta \
     LANG=C.UTF-8 \
@@ -75,10 +76,13 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     TTT_BRANCH= \
     NEXCLOUD_REPO=https://github.com/Yz776/nexcloud.git \
     NEXCLOUD_BRANCH= \
+    CATUR_REPO=https://github.com/Yz776/catur.git \
+    CATUR_BRANCH= \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
     NEXCLOUD_DIR=/data/apps/nexcloud \
+    CATUR_DIR=/data/apps/catur \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -243,11 +247,13 @@ EOF
 #   6. Dynamic memory rebalancer: limit otomatis naik/turun sesuai kebutuhan nyata
 #   7. CPU rebalance: nice adaptif berdasarkan interaksi user
 #   8. NODE_OPTIONS per-app: --max-semi-space-size=64 (gc-interval hanya via CLI)
+#   9. v3.1 — tambah app "catur" ke daftar APPS, redistribute memory budget
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
-// /data/launcher/index.js  (v3 — dinamis, minimal restart)
-// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, cloudflared
-// dengan dynamic memory allocation, CPU priority adaptif, graduated pressure response.
+// /data/launcher/index.js  (v3.1 — dinamis, minimal restart, +catur)
+// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, nexcloud,
+// catur, cloudflared dengan dynamic memory allocation, CPU priority adaptif,
+// graduated pressure response.
 // TIDAK pernah restart app karena alasan memory — limitnya yang berubah.
 //
 // ENV override (semua opsional):
@@ -260,7 +266,7 @@ RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 //   HIGH_CPU_PERCENT=18
 //   NORMAL_NICE=5  FOCUS_NICE=1  STARVE_SAFE_NICE=6
 //   APP_MEM_BUDGET_PERCENT=75    -> cap total app memory
-//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / NEXCLOUD_MEMORY_MB / CF_MEMORY_MB
+//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / NEXCLOUD_MEMORY_MB / CATUR_MEMORY_MB / CF_MEMORY_MB
 //   MEM_GUARD_SOFT_RATIO=1.15  MEM_GUARD_HARD_RATIO=1.45
 //   MEM_GUARD_MAX_STRIKES=3    MEM_GUARD_WINDOW_MS=60000  MEM_GUARD_INTERVAL_MS=8000
 //   CRASH_LOOP_WINDOW_MS=300000  CRASH_LOOP_MAX=8
@@ -278,6 +284,7 @@ const KFAI_DIR     = process.env.KFAI_DIR     || '/data/apps/kfai-nodejs';
 const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
+const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -312,11 +319,13 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi: kfai 40%, mcp 30%, ttt 15%, nexcloud 15% (cf di luar budget, kecil)
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.40)));
-const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.30)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
-const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
+// Distribusi v3.1 (5 app): kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
+// (cf di luar budget, kecil)
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.35)));
+const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.25)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
+const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.14)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
 const ADAPTIVE_INTERVAL  = Number(process.env.ADAPTIVE_INTERVAL_MS || 3000);
@@ -360,6 +369,13 @@ const APPS = [
     priority: 9,
   },
   {
+    name:     'cloudflared-ssh',
+    script:   '/usr/local/bin/run-cloudflared.sh',
+    memoryMB: CF_MEM,
+    nice:     NORMAL_NICE + 3,
+    priority: 8, // penting untuk akses SSH
+  },
+  {
     name:     'ttt',
     script:   '/usr/local/bin/run-ttt.sh',
     memoryMB: TTT_MEM,
@@ -374,11 +390,11 @@ const APPS = [
     priority: 5,
   },
   {
-    name:     'cloudflared-ssh',
-    script:   '/usr/local/bin/run-cloudflared.sh',
-    memoryMB: CF_MEM,
-    nice:     NORMAL_NICE + 3,
-    priority: 8, // penting untuk akses SSH
+    name:     'catur',
+    script:   '/usr/local/bin/run-catur.sh',
+    memoryMB: CATUR_MEM,
+    nice:     NORMAL_NICE,
+    priority: 5,
   },
 ];
 
@@ -858,7 +874,7 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v3 — dinamis, minimal restart`);
+console.log(`[LAUNCHER] v3.1 — dinamis, minimal restart, +catur`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
@@ -1004,6 +1020,7 @@ SCRIPT
 
 # ─── oom-watchdog.sh ──────────────────────────────────────────────────────────
 # Catatan v2: tambah earlyoom protection + cek interval lebih cepat (30s)
+# v2.1: tambah proteksi node.*catur
 RUN cat > /usr/local/bin/oom-watchdog.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
@@ -1023,12 +1040,14 @@ while true; do
   protect "node.*kfai"            -700
   protect "node.*ttt"             -700
   protect "node.*nexcloud"        -700
+  protect "node.*catur"           -700
   protect "cloudflared"           -500
   sleep 30
 done
 SCRIPT
 
 # ─── bootstrap-apps.sh – clone PARALEL ───────────────────────────────────────
+# v2.1: tambah catur ke daftar clone paralel
 RUN cat > /usr/local/bin/bootstrap-apps.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -u
@@ -1079,6 +1098,7 @@ clone_or_pull "kfai-nodejs" "${KFAI_REPO:-}"     "${KFAI_DIR:-/data/apps/kfai-no
 clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfai-mcp}" "${KFAI_MCP_BRANCH:-}" &
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
 clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
+clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1245,6 +1265,22 @@ exec /usr/local/bin/run-node-app.sh \
   "${NEXCLOUD_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
+# ─── run-catur.sh ─────────────────────────────────────────────────────────────
+# v3.1 — launcher script untuk aplikasi catur (https://github.com/Yz776/catur.git)
+# Default memory 256MB (override via CATUR_NODE_OPTIONS / CATUR_MEMORY_MB di launcher)
+RUN cat > /usr/local/bin/run-catur.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/bin/run-node-app.sh \
+  "catur" \
+  "${CATUR_DIR:-/data/apps/catur}" \
+  "${CATUR_ENTRY:-server.js}" \
+  "${CATUR_NODE_MODULES_ZIP:-node_modules.zip}" \
+  "${CATUR_USE_NODE_MODULES_ZIP:-true}" \
+  "${CATUR_SKIP_NPM_INSTALL:-false}" \
+  "${CATUR_NODE_OPTIONS:---max-old-space-size=256}"
+SCRIPT
+
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1263,7 +1299,7 @@ ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
 ulimit -u 65535   2>/dev/null || true
 mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/tmp
 chmod 700 /data/root /data/root/.pm2 /data/root/.npm 2>/dev/null || true
-chmod 1777 /tmp /data/tmp 2>/dev/null || true
+chmod 1777 /data/tmp /tmp 2>/dev/null || true
 npm config set prefer-offline true --global >/dev/null 2>&1 || true
 npm config set audit false --global         >/dev/null 2>&1 || true
 npm config set fund false --global          >/dev/null 2>&1 || true
@@ -1274,6 +1310,7 @@ SCRIPT
 
 # ─── kstatus ──────────────────────────────────────────────────────────────────
 # Catatan v2: tambah info cgroup memory limit + per-app RSS live
+# v2.1: tambah catur ke per-app RSS live
 RUN cat > /usr/local/bin/kstatus <<'SCRIPT'
 #!/usr/bin/env bash
 set +e
@@ -1304,7 +1341,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js v2)"
+  echo "Mode: adaptive launcher (index.js v3.1)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1314,7 +1351,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "cloudflared" "adaptive-launcher"; do
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "cloudflared" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1323,7 +1360,7 @@ for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "cloudflared" "adaptive-lau
 done
 
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" "node.*catur" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1347,6 +1384,8 @@ SCRIPT
 #   • Bersihkan proses orphan dari run sebelumnya
 #   • Mulai nscd via service-aware fallback
 #   • PM2 ecosystem ditambah min_uptime + max_restarts + exp_backoff_restart_delay
+#   v2.1: earlyoom --prefer / --avoid pattern diperluas untuk catur
+#          PM2 ecosystem ditambah app catur
 RUN cat > /usr/local/bin/start-all.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1438,12 +1477,12 @@ BOOTSTRAP_PID=$!
 # -r 3600: report interval 1 jam
 # -m 10:    trigger saat MemAvailable < 10%
 # --avoid "(^node.*adaptive|^node.*launcher|^/usr/sbin/sshd|^earlyoom)": jangan bunuh ini
-# --prefer "(^node.*kfai|^node.*ttt|^node.*nexcloud|^cloudflared)": bunuh ini dulu
+# --prefer "(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)": bunuh ini dulu
 if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2)' \
-    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^cloudflared)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1468,12 +1507,12 @@ LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 echo "[start-all] LAUNCHER_MODE=${LAUNCHER_MODE}"
 
 if [ "$LAUNCHER_MODE" = "pm2" ]; then
-  # ── PM2 mode (v2: tambah min_uptime + max_restarts + exp_backoff) ─────────
+  # ── PM2 mode (v2.1: tambah app catur) ────────────────────────────────────
   echo "[start-all] mode PM2"
   cat > /data/ecosystem.config.js <<'PM2EOF'
 const fs = require('fs');
 
-// cgroup-aware memory detection (sama dengan launcher v2)
+// cgroup-aware memory detection (sama dengan launcher v3.1)
 function detectContainerMemMB() {
   try {
     const v = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
@@ -1492,11 +1531,13 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
+// Distribusi v3.1: kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
 const mem = {
-  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.40))+'M',
-  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.30))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
-  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.35))+'M',
+  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.25))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.13))+'M',
+  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.13))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.14))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -1520,12 +1561,16 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.nexcloud, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+  { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
 
 else
-  # ── Adaptive launcher mode (default, v2) ──────────────────────────────────
+  # ── Adaptive launcher mode (default, v3.1) ───────────────────────────────
   echo "[start-all] mode adaptive launcher"
   # Pastikan launcher ada di /data (persistent – bisa di-edit via SSH)
   [ ! -f /data/launcher/index.js ] && cp /usr/local/bin/adaptive-launcher.js /data/launcher/index.js
@@ -1546,6 +1591,7 @@ RUN chmod +x \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
       /usr/local/bin/run-nexcloud.sh \
+      /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
