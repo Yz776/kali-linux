@@ -78,14 +78,11 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     NEXCLOUD_BRANCH= \
     CATUR_REPO=https://github.com/Yz776/catur.git \
     CATUR_BRANCH= \
-    ANIMEST_REPO=https://github.com/Yz776/animest.git \
-    ANIMEST_BRANCH= \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
     NEXCLOUD_DIR=/data/apps/nexcloud \
     CATUR_DIR=/data/apps/catur \
-    ANIMEST_DIR=/data/apps/animest \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -253,9 +250,9 @@ EOF
 #   9. v3.1 — tambah app "catur" ke daftar APPS, redistribute memory budget
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
-// /data/launcher/index.js  (v3.2 — dinamis, minimal restart, +animest)
+// /data/launcher/index.js  (v3.1 — dinamis, minimal restart, +catur)
 // Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, nexcloud,
-// catur, animest, cloudflared dengan dynamic memory allocation, CPU priority adaptif,
+// catur, cloudflared dengan dynamic memory allocation, CPU priority adaptif,
 // graduated pressure response.
 // TIDAK pernah restart app karena alasan memory — limitnya yang berubah.
 //
@@ -288,7 +285,6 @@ const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
-const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -323,14 +319,13 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v3.2 (6 app): kfai 32%, mcp 22%, ttt 11%, nexcloud 11%, catur 12%, animest 12%
+// Distribusi v3.1 (5 app): kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
 // (cf di luar budget, kecil)
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.32)));
-const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.22)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.11)));
-const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.11)));
-const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.12)));
-const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.12)));
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.35)));
+const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.25)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
+const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.14)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
 const ADAPTIVE_INTERVAL  = Number(process.env.ADAPTIVE_INTERVAL_MS || 3000);
@@ -398,13 +393,6 @@ const APPS = [
     name:     'catur',
     script:   '/usr/local/bin/run-catur.sh',
     memoryMB: CATUR_MEM,
-    nice:     NORMAL_NICE,
-    priority: 5,
-  },
-  {
-    name:     'animest',
-    script:   '/usr/local/bin/run-animest.sh',
-    memoryMB: ANIMEST_MEM,
     nice:     NORMAL_NICE,
     priority: 5,
   },
@@ -886,7 +874,7 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v3.2 — dinamis, minimal restart, +animest`);
+console.log(`[LAUNCHER] v3.1 — dinamis, minimal restart, +catur`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
@@ -1053,7 +1041,6 @@ while true; do
   protect "node.*ttt"             -700
   protect "node.*nexcloud"        -700
   protect "node.*catur"           -700
-  protect "node.*animest"         -700
   protect "cloudflared"           -500
   sleep 30
 done
@@ -1112,7 +1099,6 @@ clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfa
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
 clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
-clone_or_pull "animest"     "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1295,70 +1281,6 @@ exec /usr/local/bin/run-node-app.sh \
   "${CATUR_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
-# ─── ensure-animest-deps.sh ───────────────────────────────────────────────────
-# Khusus animest: install deps wajib pakai --legacy-peer-deps
-RUN cat > /usr/local/bin/ensure-animest-deps.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-APP_NAME="animest"
-APP_DIR="${ANIMEST_DIR:-/data/apps/animest}"
-
-[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
-cd "$APP_DIR"
-[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
-
-# Coba ekstrak dari zip dulu kalau ada
-if [ -f node_modules.zip ]; then
-  echo "[$APP_NAME] mencoba ekstrak node_modules dari zip..."
-  rm -rf node_modules node_modules.tmp && mkdir -p node_modules.tmp
-  if unzip -q node_modules.zip -d node_modules.tmp 2>/dev/null; then
-    [ -d node_modules.tmp/node_modules ] \
-      && mv node_modules.tmp/node_modules ./node_modules \
-      || mv node_modules.tmp ./node_modules
-    rm -rf node_modules.tmp
-    # Pastikan zip benar2 lengkap: cek bukan cuma ada isi, tapi vite CLI-nya ada.
-    if [ -f node_modules/.bin/vite ] || [ -f node_modules/vite/bin/vite.js ]; then
-      echo "[$APP_NAME] pakai node_modules dari zip (vite terverifikasi)."
-      exit 0
-    fi
-    echo "[$APP_NAME] zip tidak lengkap (vite tidak ditemukan), lanjut npm install."
-  fi
-  rm -rf node_modules node_modules.tmp
-  echo "[$APP_NAME] zip gagal/kosong, lanjut npm install."
-fi
-
-echo "[$APP_NAME] npm install --legacy-peer-deps ..."
-# Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan
-export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-# Catatan: TIDAK pakai --omit=dev di sini. animest butuh "vite" (devDependency)
-# untuk menjalankan "npm run prod" (build step). --omit=dev sebelumnya membuat
-# npm install "berhasil" tanpa vite -> "sh: 1: vite: not found" saat run-animest.sh.
-npm install --legacy-peer-deps \
-  --include=optional \
-  --no-audit --no-fund --loglevel=error --prefer-offline \
-  || npm install --legacy-peer-deps \
-       --no-audit --no-fund --loglevel=error
-npm cache clean --force >/dev/null 2>&1 || true
-echo "[$APP_NAME] deps siap."
-SCRIPT
-
-# ─── run-animest.sh ───────────────────────────────────────────────────────────
-# Khusus animest: deps via ensure-animest-deps.sh, run via npm run prod
-RUN cat > /usr/local/bin/run-animest.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-APP_NAME="animest"
-APP_DIR="${ANIMEST_DIR:-/data/apps/animest}"
-
-[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
-cd "$APP_DIR"
-
-/usr/local/bin/ensure-animest-deps.sh
-
-echo "[$APP_NAME] start: npm run prod"
-exec /usr/local/bin/clear-app-port-env.sh npm run prod
-SCRIPT
-
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1429,7 +1351,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "animest" "cloudflared" "adaptive-launcher"; do
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "cloudflared" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1438,7 +1360,7 @@ for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "animest" "cloudfla
 done
 
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" "node.*catur" "node.*animest" sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" "node.*catur" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1560,7 +1482,7 @@ if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2)' \
-    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^node.*animest|^cloudflared)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1609,14 +1531,13 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v3.2: kfai 32%, mcp 22%, ttt 11%, nexcloud 11%, catur 12%, animest 12%
+// Distribusi v3.1: kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
 const mem = {
-  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.32))+'M',
-  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.22))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.11))+'M',
-  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.11))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.12))+'M',
-  animest:  process.env.ANIMEST_MAX_MEMORY   || Math.min(384,  Math.floor(BUDGET*0.12))+'M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.35))+'M',
+  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.25))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.13))+'M',
+  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.13))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.14))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -1644,10 +1565,6 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
-  { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
-    exp_backoff_restart_delay:200, max_memory_restart:mem.animest, kill_timeout:10000,
-    listen_timeout:15000, env:{NODE_ENV:'production'} },
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
@@ -1675,8 +1592,6 @@ RUN chmod +x \
       /usr/local/bin/run-ttt.sh \
       /usr/local/bin/run-nexcloud.sh \
       /usr/local/bin/run-catur.sh \
-      /usr/local/bin/ensure-animest-deps.sh \
-      /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
