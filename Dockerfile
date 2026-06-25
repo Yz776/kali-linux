@@ -1297,27 +1297,51 @@ SCRIPT
 
 # ─── run-animest.sh ───────────────────────────────────────────────────────────
 # v3.2 — launcher script untuk aplikasi animest (https://github.com/Yz776/animest.git)
-# Menggunakan npm install --legacy-peer-deps dan npm run start
+# Pakai node_modules dari ZIP (--legacy-peer-deps sebagai fallback install)
+# Jalankan dengan: npm run start
 # Default memory 256MB (override via ANIMEST_NODE_OPTIONS / ANIMEST_MEMORY_MB di launcher)
 RUN cat > /usr/local/bin/run-animest.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 APP_NAME="animest"
 APP_DIR="${ANIMEST_DIR:-/data/apps/animest}"
+ZIP_FILE="${ANIMEST_NODE_MODULES_ZIP:-node_modules.zip}"
+USE_ZIP="${ANIMEST_USE_NODE_MODULES_ZIP:-true}"
 
 [ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
 cd "$APP_DIR"
 [ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
 
-# Install deps jika node_modules belum ada
-if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
-  echo "[$APP_NAME] npm install --legacy-peer-deps..."
-  export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-  npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error --prefer-offline \
-    || { echo "[$APP_NAME] WARN: npm install gagal, coba tanpa --prefer-offline..."; \
-         npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error; }
-  npm cache clean --force >/dev/null 2>&1 || true
-  echo "[$APP_NAME] deps siap."
+# ── Coba ekstrak dari zip dulu ──────────────────────────────────────────────
+extract_zip() {
+  [ ! -f "$1" ] && return 1
+  echo "[$APP_NAME] ekstrak zip: $1"
+  rm -rf node_modules node_modules.tmp && mkdir -p node_modules.tmp
+  unzip -q "$1" -d node_modules.tmp || { rm -rf node_modules.tmp; return 1; }
+  [ -d node_modules.tmp/node_modules ] \
+    && mv node_modules.tmp/node_modules ./node_modules \
+    || mv node_modules.tmp ./node_modules
+  rm -rf node_modules.tmp
+  find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q . && return 0
+  rm -rf node_modules; return 1
+}
+
+NEED_INSTALL=true
+if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
+  echo "[$APP_NAME] pakai node_modules dari zip."
+  NEED_INSTALL=false
+fi
+
+# ── Fallback: npm install --legacy-peer-deps ─────────────────────────────────
+if [ "$NEED_INSTALL" = "true" ]; then
+  if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
+    echo "[$APP_NAME] npm install --legacy-peer-deps..."
+    export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+    npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error --prefer-offline \
+      || npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error
+    npm cache clean --force >/dev/null 2>&1 || true
+    echo "[$APP_NAME] deps siap."
+  fi
 fi
 
 echo "[$APP_NAME] start: npm run start"
