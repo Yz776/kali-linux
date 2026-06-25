@@ -1316,10 +1316,12 @@ if [ -f node_modules.zip ]; then
       && mv node_modules.tmp/node_modules ./node_modules \
       || mv node_modules.tmp ./node_modules
     rm -rf node_modules.tmp
-    if find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q .; then
-      echo "[$APP_NAME] pakai node_modules dari zip."
+    # Pastikan zip benar2 lengkap: cek bukan cuma ada isi, tapi vite CLI-nya ada.
+    if [ -f node_modules/.bin/vite ] || [ -f node_modules/vite/bin/vite.js ]; then
+      echo "[$APP_NAME] pakai node_modules dari zip (vite terverifikasi)."
       exit 0
     fi
+    echo "[$APP_NAME] zip tidak lengkap (vite tidak ditemukan), lanjut npm install."
   fi
   rm -rf node_modules node_modules.tmp
   echo "[$APP_NAME] zip gagal/kosong, lanjut npm install."
@@ -1328,8 +1330,11 @@ fi
 echo "[$APP_NAME] npm install --legacy-peer-deps ..."
 # Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan
 export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+# Catatan: TIDAK pakai --omit=dev di sini. animest butuh "vite" (devDependency)
+# untuk menjalankan "npm run prod" (build step). --omit=dev sebelumnya membuat
+# npm install "berhasil" tanpa vite -> "sh: 1: vite: not found" saat run-animest.sh.
 npm install --legacy-peer-deps \
-  --omit=dev --include=optional \
+  --include=optional \
   --no-audit --no-fund --loglevel=error --prefer-offline \
   || npm install --legacy-peer-deps \
        --no-audit --no-fund --loglevel=error
