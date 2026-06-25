@@ -1355,8 +1355,8 @@ cd "$APP_DIR"
 
 /usr/local/bin/ensure-animest-deps.sh
 
-echo "[$APP_NAME] start: npm run prod"
-exec /usr/local/bin/clear-app-port-env.sh npm run prod
+echo "[$APP_NAME] start: tsx server/index.ts"
+exec /usr/local/bin/clear-app-port-env.sh tsx server/index.ts
 SCRIPT
 
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
