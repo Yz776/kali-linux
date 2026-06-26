@@ -8,7 +8,7 @@ FROM kalilinux/kali-rolling
 #   • NODE_OPTIONS ditambah --max-semi-space-size=64 (GC lebih efisien)
 #   • --gc-interval=100 DIHAPUS dari NODE_OPTIONS (tidak diizinkan Node.js di NODE_OPTIONS)
 #   • PATH tetap, untuk compat dengan script existing
-#   • v3.1 — tambah aplikasi "catur" (https://github.com/Yz776/catur.git)
+#   • v3.2 — tambah aplikasi "animest" (https://github.com/Yz776/animest.git)
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Jakarta \
     LANG=C.UTF-8 \
@@ -78,11 +78,14 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     NEXCLOUD_BRANCH= \
     CATUR_REPO=https://github.com/Yz776/catur.git \
     CATUR_BRANCH= \
+    ANIMEST_REPO=https://github.com/Yz776/animest.git \
+    ANIMEST_BRANCH= \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
     NEXCLOUD_DIR=/data/apps/nexcloud \
     CATUR_DIR=/data/apps/catur \
+    ANIMEST_DIR=/data/apps/animest \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -285,6 +288,7 @@ const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
+const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -319,13 +323,13 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v3.1 (5 app): kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
-// (cf di luar budget, kecil)
+// Distribusi v3.2 (5 app): kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
 const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.35)));
 const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.25)));
 const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
 const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.13)));
 const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.14)));
+const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.11)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
 const ADAPTIVE_INTERVAL  = Number(process.env.ADAPTIVE_INTERVAL_MS || 3000);
@@ -1099,6 +1103,7 @@ clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfa
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
 clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
+clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1281,6 +1286,63 @@ exec /usr/local/bin/run-node-app.sh \
   "${CATUR_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
+# ─── run-animest.sh ───────────────────────────────────────────────────────────
+# v3.2 — launcher script untuk aplikasi animest (https://github.com/Yz776/animest.git)
+# Pakai node_modules dari ZIP (--legacy-peer-deps sebagai fallback install)
+# Jalankan dengan: npm run start
+# Default memory 256MB (override via ANIMEST_NODE_OPTIONS / ANIMEST_MEMORY_MB di launcher)
+RUN cat > /usr/local/bin/run-animest.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="animest"
+APP_DIR="${ANIMEST_DIR:-/data/apps/animest}"
+ZIP_FILE="${ANIMEST_NODE_MODULES_ZIP:-node_modules.zip}"
+USE_ZIP="${ANIMEST_USE_NODE_MODULES_ZIP:-true}"
+
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+cd "$APP_DIR"
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
+
+# ── Coba ekstrak dari zip dulu ──────────────────────────────────────────────
+extract_zip() {
+  [ ! -f "$1" ] && return 1
+  echo "[$APP_NAME] ekstrak zip: $1"
+  rm -rf node_modules node_modules.tmp && mkdir -p node_modules.tmp
+  unzip -q "$1" -d node_modules.tmp || { rm -rf node_modules.tmp; return 1; }
+  [ -d node_modules.tmp/node_modules ] \
+    && mv node_modules.tmp/node_modules ./node_modules \
+    || mv node_modules.tmp ./node_modules
+  rm -rf node_modules.tmp
+  find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q . && return 0
+  rm -rf node_modules; return 1
+}
+
+NEED_INSTALL=true
+if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
+  echo "[$APP_NAME] pakai node_modules dari zip."
+  NEED_INSTALL=false
+fi
+
+# ── Fallback: npm install --legacy-peer-deps ─────────────────────────────────
+if [ "$NEED_INSTALL" = "true" ]; then
+  if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
+    echo "[$APP_NAME] npm install --legacy-peer-deps..."
+    export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+    npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error --prefer-offline \
+      || npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error
+    npm cache clean --force >/dev/null 2>&1 || true
+    echo "[$APP_NAME] deps siap."
+  fi
+fi
+
+echo "[$APP_NAME] build frontend: npm run build"
+export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+npm run build
+
+echo "[$APP_NAME] start backend: npm run start"
+exec npm run start
+SCRIPT
+
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1341,7 +1403,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js v3.1)"
+  echo "Mode: adaptive launcher (index.js v3.2)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1531,7 +1593,7 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v3.1: kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
+// Distribusi v3.2: kfai 35%, mcp 25%, ttt 13%, nexcloud 13%, catur 14%
 const mem = {
   kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.35))+'M',
   mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.25))+'M',
@@ -1570,7 +1632,7 @@ PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
 
 else
-  # ── Adaptive launcher mode (default, v3.1) ───────────────────────────────
+  # ── Adaptive launcher mode (default, v3.2) ───────────────────────────────
   echo "[start-all] mode adaptive launcher"
   # Pastikan launcher ada di /data (persistent – bisa di-edit via SSH)
   [ ! -f /data/launcher/index.js ] && cp /usr/local/bin/adaptive-launcher.js /data/launcher/index.js
@@ -1592,6 +1654,7 @@ RUN chmod +x \
       /usr/local/bin/run-ttt.sh \
       /usr/local/bin/run-nexcloud.sh \
       /usr/local/bin/run-catur.sh \
+      /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
