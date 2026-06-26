@@ -1337,8 +1337,8 @@ if [ "$NEED_INSTALL" = "true" ]; then
   if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
     echo "[$APP_NAME] npm install --legacy-peer-deps..."
     export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-    npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error --prefer-offline \
-      || npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error
+    npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error --prefer-offline \
+      || npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error
     npm cache clean --force >/dev/null 2>&1 || true
     echo "[$APP_NAME] deps siap."
   fi
