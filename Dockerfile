@@ -142,32 +142,32 @@ RUN set -eux; \
     apt-get update -qq; \
     apt-get install -y --no-install-recommends \
       libglib2.0-0 \
+      libasound2t64 \
       libnss3 \
       libnspr4 \
       libatk1.0-0 \
       libatk-bridge2.0-0 \
-      libcups2 \
-      libdrm2 \
+      libcups2t64 \
       libdbus-1-3 \
-      libxcb1 \
-      libxkbcommon0 \
-      libxcomposite1 \
-      libxdamage1 \
-      libxfixes3 \
-      libxrandr2 \
+      libdrm2 \
       libgbm1 \
-      libasound2 \
-      libpango-1.0-0 \
-      libpangocairo-1.0-0 \
-      libcairo2 \
       libx11-6 \
       libx11-xcb1 \
+      libxcb1 \
+      libxcomposite1 \
+      libxdamage1 \
       libxext6 \
+      libxfixes3 \
+      libxkbcommon0 \
+      libxrandr2 \
       libxrender1 \
       libxshmfence1 \
       libxss1 \
+      libgtk-3-0 \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libcairo2 \
       fonts-liberation \
-      ca-certificates \
     ; \
     apt-get autoremove -y; \
     apt-get clean; \
