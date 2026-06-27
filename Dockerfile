@@ -136,6 +136,44 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 1B – Browser/Chromium runtime deps (Playwright/Puppeteer prerequisites)
+# ═══════════════════════════════════════════════════════════════════════════════
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y --no-install-recommends \
+      libglib2.0-0 \
+      libnss3 \
+      libnspr4 \
+      libatk1.0-0 \
+      libatk-bridge2.0-0 \
+      libcups2 \
+      libdrm2 \
+      libdbus-1-3 \
+      libxcb1 \
+      libxkbcommon0 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxfixes3 \
+      libxrandr2 \
+      libgbm1 \
+      libasound2 \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libcairo2 \
+      libx11-6 \
+      libx11-xcb1 \
+      libxext6 \
+      libxrender1 \
+      libxshmfence1 \
+      libxss1 \
+      fonts-liberation \
+      ca-certificates \
+    ; \
+    apt-get autoremove -y; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 2 – Cloudflared
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN set -eux; \
