@@ -113,7 +113,7 @@ RUN set -eux; \
       bash ca-certificates curl wget git gnupg lsb-release \
       openssh-server openssl sudo tini \
       nano vim htop procps net-tools iproute2 \
-      iputils-ping dnsutils bind9-dnsutils unzip \
+      iputils-ping dnsutils bind9-dnsutils unzip zstd \
       build-essential python3 python3-pip \
       earlyoom nscd \
     ; \
