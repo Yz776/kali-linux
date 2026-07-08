@@ -119,7 +119,7 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     TTT_DIR=/data/apps/ttt \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
-    LAUNCHER_DIR=/data/launcher
+    LAUNCHER_DIR=/data/launcher \
     # ── Puppeteer-at-scale (single shared Chromium daemon + tab pool) ──
     # Semua app Node yang pakai puppeteer.connect() ke daemon ini,
     # BUKAN puppeteer.launch() — 1 browser shared, jutaan tab hemat RAM.
