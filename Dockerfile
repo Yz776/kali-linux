@@ -1,13 +1,17 @@
-FROM debian:bookworm-slim
-
-# v5-minimal: base image diganti ke debian:bookworm-slim (lebih ringan dari Ubuntu 24.04)
-#   - Fix nama paket: libasound2t64 -> libasound2, libcups2t64 -> libcups2 (suffix t64 Ubuntu-only)
-#   - Sisanya dikembalikan ke kondisi original commit c4ac247
+FROM ubuntu:24.04
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-# Catatan perubahan (v4 — Ubuntu 24.04 + Ollama):
+# Catatan perubahan (v4-ram — Ubuntu 24.04 + tuning hemat RAM tambahan):
+#   • Base image: ubuntu:24.04 (kembali ke original)
+#   • Tambahan tuning hemat RAM di resource-optimizer.sh:
+#     - zram swap (zstd, 50% RAM, cap 2GB) — kompresi in-memory
+#     - swappiness adaptif (60 jika zram aktif, 5 jika tidak)
+#     - bump fs.file-max 4M, ulimit -n 4M (untuk koneksi banyak)
+#     - tcp_max_tw_buckets 2M, ip_local_port_range 1024-65535
+#     - drop_caches periodik jika MemAvailable < 384MB
+#   • Sisanya tetap v4 original
 #   • Base image: ubuntu:24.04 (lebih stabil dari Kali Rolling)
 #   • Ditambah service Ollama (LLM lokal) dijalankan via PM2/adaptive launcher
 #   • Ollama models disimpan di /data/ollama (persistent)
@@ -151,12 +155,12 @@ RUN set -eux; \
     apt-get update -qq; \
     apt-get install -y --no-install-recommends \
       libglib2.0-0 \
-      libasound2 \
+      libasound2t64 \
       libnss3 \
       libnspr4 \
       libatk1.0-0 \
       libatk-bridge2.0-0 \
-      libcups2 \
+      libcups2t64 \
       libdbus-1-3 \
       libdrm2 \
       libgbm1 \
@@ -1045,7 +1049,26 @@ MIN_FREE=$(( MEM_KB / 20 ))
 [ "$MIN_FREE" -gt 65536 ] && MIN_FREE=65536
 
 sc() { sysctl -w "$1=$2" >/dev/null 2>&1 && log "sysctl $1=$2" || true; }
-sc vm.swappiness               5
+# v4-ram: zram swap (kompresi in-memory) — dramatis untuk container RAM kecil
+# Container biasanya tidak bisa modprobe, jadi wrap dengan cek
+if command -v modprobe >/dev/null 2>&1 && [ ! -e /dev/zram0 ]; then
+  modprobe zram num_devices=1 2>/dev/null && log "zram: module loaded" || true
+fi
+if [ -e /dev/zram0 ] && ! swapon -s 2>/dev/null | grep -q zram0; then
+  echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+  # zram size = 50% RAM (cap 2GB), kompresi zstd biasanya 3-4x
+  ZRAM_SIZE=$(( MEM_KB / 2 ))
+  [ "$ZRAM_SIZE" -gt 2097152 ] && ZRAM_SIZE=2097152
+  echo "$ZRAM_SIZE"K > /sys/block/zram0/disksize 2>/dev/null || true
+  mkswap /dev/zram0 2>/dev/null && swapon -p 100 /dev/zram0 2>/dev/null \
+    && log "zram: enabled ($(( ZRAM_SIZE / 1024 ))MB, zstd, priority 100)" || true
+fi
+# Swappiness: tinggi (60) kalau zram aktif (kompresi cepat), rendah (5) kalau tidak
+if swapon -s 2>/dev/null | grep -q zram0; then
+  sc vm.swappiness               60
+else
+  sc vm.swappiness               5
+fi
 sc vm.dirty_ratio              20
 sc vm.dirty_background_ratio   5
 sc vm.vfs_cache_pressure       50
@@ -1059,16 +1082,23 @@ sc net.ipv4.tcp_keepalive_probes   5
 sc net.ipv4.tcp_fastopen           3
 sc net.ipv4.tcp_tw_reuse           1
 sc net.ipv4.tcp_fin_timeout        30
+# v4-ram: tambahan network tuning untuk banyak koneksi concurrent
+sc net.ipv4.ip_local_port_range    "1024 65535"
+sc net.ipv4.tcp_max_tw_buckets     2000000
+sc net.ipv4.tcp_max_syn_backlog    65535
 sc net.core.rmem_max               16777216
 sc net.core.wmem_max               16777216
 sc net.core.somaxconn              65535
 sc net.core.netdev_max_backlog     5000
-sc fs.file-max                     1048576
-sc fs.inotify.max_user_watches     524288
-sc fs.inotify.max_user_instances   1024
+# v4-ram: bump file descriptor limit untuk banyak proses/koneksi
+sc fs.file-max                     4194304
+sc fs.nr_open                      4194304
+sc fs.inotify.max_user_watches     1048576
+sc fs.inotify.max_user_instances   4096
 
-ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
-ulimit -u 65535   2>/dev/null || true
+# v4-ram: bump FD limit untuk banyak proses/koneksi concurrent
+ulimit -n 4194304 2>/dev/null || ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
+ulimit -u 262144  2>/dev/null || ulimit -u 65535   2>/dev/null || true
 ulimit -s unlimited 2>/dev/null || true
 ulimit -c 0       2>/dev/null || true
 
@@ -1079,10 +1109,11 @@ for dev in /sys/block/*/queue/scheduler; do
   [ -f "$dev" ] && { echo none > "$dev" 2>/dev/null || echo mq-deadline > "$dev" 2>/dev/null || true; }
 done
 
-# Drop cache hanya jika MemAvailable < 256MB
+# v4-ram: drop cache lebih agresif — threshold 384MB (dari 256MB)
+# agar container RAM kecil tetap punya headroom
 AVAIL_MB=$(awk '/MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 9999)
-if [ "${AVAIL_MB:-9999}" -lt 256 ]; then
-  log "MemAvailable=${AVAIL_MB}MB < 256MB → drop caches"
+if [ "${AVAIL_MB:-9999}" -lt 384 ]; then
+  log "MemAvailable=${AVAIL_MB}MB < 384MB → drop caches"
   sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 else
   log "MemAvailable=${AVAIL_MB}MB OK, skip drop_caches"
