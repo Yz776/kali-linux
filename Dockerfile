@@ -87,8 +87,6 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     KFAI_MCP_BRANCH=master \
     TTT_REPO=https://github.com/Yz776/ttt.git \
     TTT_BRANCH= \
-    NEXCLOUD_REPO=https://github.com/Yz776/nexcloud.git \
-    NEXCLOUD_BRANCH= \
     CATUR_REPO=https://github.com/Yz776/catur.git \
     CATUR_BRANCH= \
     ANIMEST_REPO=https://github.com/Yz776/animest.git \
@@ -96,7 +94,6 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
-    NEXCLOUD_DIR=/data/apps/nexcloud \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
     LAUNCHER_DIR=/data/launcher
@@ -315,7 +312,7 @@ EOF
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 // /data/launcher/index.js  (v4 — Ubuntu 24.04 + Ollama/animest)
-// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, nexcloud,
+// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt,
 // catur, ollama (animest), cloudflared dengan dynamic memory allocation,
 // CPU priority adaptif, graduated pressure response.
 // TIDAK pernah restart app karena alasan memory — limitnya yang berubah.
@@ -330,7 +327,7 @@ RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 //   HIGH_CPU_PERCENT=18
 //   NORMAL_NICE=5  FOCUS_NICE=1  STARVE_SAFE_NICE=6
 //   APP_MEM_BUDGET_PERCENT=75    -> cap total app memory
-//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / NEXCLOUD_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB
+//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB
 //   MEM_GUARD_SOFT_RATIO=1.15  MEM_GUARD_HARD_RATIO=1.45
 //   MEM_GUARD_MAX_STRIKES=3    MEM_GUARD_WINDOW_MS=60000  MEM_GUARD_INTERVAL_MS=8000
 //   CRASH_LOOP_WINDOW_MS=300000  CRASH_LOOP_MAX=8
@@ -347,7 +344,6 @@ const path = require('path');
 const KFAI_DIR     = process.env.KFAI_DIR     || '/data/apps/kfai-nodejs';
 const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
-const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 const OLLAMA_DIR   = process.env.OLLAMA_DIR   || '/data/ollama';
@@ -385,12 +381,11 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v4 (7 app): kfai 28%, mcp 20%, ollama 18%, ttt 9%, nexcloud 9%, catur 10%, cf 6%
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.28)));
-const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.20)));
-const OLLAMA_MEM   = Number(process.env.OLLAMA_MEMORY_MB   || Math.min(768,  Math.floor(APP_BUDGET_MB * 0.18)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
-const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
+// Distribusi v4-ram (6 app — nexcloud dihapus): kfai 32%, mcp 22%, ollama 20%, ttt 10%, catur 10%, cf 6%
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.32)));
+const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.22)));
+const OLLAMA_MEM   = Number(process.env.OLLAMA_MEMORY_MB   || Math.min(768,  Math.floor(APP_BUDGET_MB * 0.20)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.10)));
 const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.10)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
@@ -453,13 +448,6 @@ const APPS = [
     name:     'ttt',
     script:   '/usr/local/bin/run-ttt.sh',
     memoryMB: TTT_MEM,
-    nice:     NORMAL_NICE,
-    priority: 5,
-  },
-  {
-    name:     'nexcloud',
-    script:   '/usr/local/bin/run-nexcloud.sh',
-    memoryMB: NEXCLOUD_MEM,
     nice:     NORMAL_NICE,
     priority: 5,
   },
@@ -1149,7 +1137,6 @@ while true; do
   protect "node.*server"          -700
   protect "node.*kfai"            -700
   protect "node.*ttt"             -700
-  protect "node.*nexcloud"        -700
   protect "node.*catur"           -700
   protect "cloudflared"           -500
   sleep 30
@@ -1207,7 +1194,6 @@ mkdir -p /data/apps /data/bin /data/root/.pm2 /data/root/.npm /data/root/.yarn /
 clone_or_pull "kfai-nodejs" "${KFAI_REPO:-}"     "${KFAI_DIR:-/data/apps/kfai-nodejs}"  "${KFAI_BRANCH:-}" &
 clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfai-mcp}" "${KFAI_MCP_BRANCH:-}" &
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
-clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 
@@ -1366,20 +1352,6 @@ exec /usr/local/bin/run-node-app.sh \
   "${TTT_USE_NODE_MODULES_ZIP:-true}" \
   "${TTT_SKIP_NPM_INSTALL:-false}" \
   "${TTT_NODE_OPTIONS:---max-old-space-size=256}"
-SCRIPT
-
-# ─── run-nexcloud.sh ──────────────────────────────────────────────────────────
-RUN cat > /usr/local/bin/run-nexcloud.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-exec /usr/local/bin/run-node-app.sh \
-  "nexcloud" \
-  "${NEXCLOUD_DIR:-/data/apps/nexcloud}" \
-  "${NEXCLOUD_ENTRY:-server.js}" \
-  "${NEXCLOUD_NODE_MODULES_ZIP:-node_modules.zip}" \
-  "${NEXCLOUD_USE_NODE_MODULES_ZIP:-true}" \
-  "${NEXCLOUD_SKIP_NPM_INSTALL:-false}" \
-  "${NEXCLOUD_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
 # ─── run-catur.sh ─────────────────────────────────────────────────────────────
@@ -1550,7 +1522,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "ollama" "cloudflared" "adaptive-launcher"; do
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "catur" "ollama" "cloudflared" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1571,7 +1543,7 @@ else
 fi
 
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" "node.*catur" ollama sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*catur" ollama sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1686,12 +1658,12 @@ BOOTSTRAP_PID=$!
 # -r 3600: report interval 1 jam
 # -m 10:    trigger saat MemAvailable < 10%
 # --avoid "(^node.*adaptive|^node.*launcher|^/usr/sbin/sshd|^earlyoom|^ollama)": jangan bunuh ini
-# --prefer "(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)": bunuh ini dulu
+# --prefer "(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared)": bunuh ini dulu
 if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2|^ollama)' \
-    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1740,13 +1712,12 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v4 (7 app): kfai 28%, mcp 20%, ollama 18%, ttt 9%, nexcloud 9%, catur 10%, cf 6%
+// Distribusi v4-ram (6 app — nexcloud dihapus): kfai 32%, mcp 22%, ollama 20%, ttt 10%, catur 10%, cf 6%
 const mem = {
-  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.28))+'M',
-  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.20))+'M',
-  ollama:   process.env.OLLAMA_MAX_MEMORY   || Math.min(768,  Math.floor(BUDGET*0.18))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.09))+'M',
-  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.09))+'M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.32))+'M',
+  mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.22))+'M',
+  ollama:   process.env.OLLAMA_MAX_MEMORY   || Math.min(768,  Math.floor(BUDGET*0.20))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.10))+'M',
   catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.10))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
@@ -1773,10 +1744,6 @@ module.exports = { apps: [
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
-    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
-  { name:'nexcloud', script:'/usr/local/bin/run-nexcloud.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
-    exp_backoff_restart_delay:200, max_memory_restart:mem.nexcloud, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
@@ -1807,7 +1774,6 @@ RUN chmod +x \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
-      /usr/local/bin/run-nexcloud.sh \
       /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-ollama.sh \
