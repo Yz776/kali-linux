@@ -42,6 +42,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
     PM2_HOME=/data/root/.pm2 \
     NPM_CONFIG_CACHE=/data/root/.npm \
+    YARN_CACHE_FOLDER=/data/root/.yarn \
     PATH="/data/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     # Git
     GIT_TERMINAL_PROMPT=0 \
@@ -207,15 +208,18 @@ RUN set -eux; \
 RUN set -eux; \
     curl -fsSL --retry 3 https://deb.nodesource.com/setup_20.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
-    # v4-ram: pin npm@10 (npm@latest=v12 butuh Node 22+, incompatible dgn Node 20)
-    npm install -g npm@10 pm2 --no-audit --no-fund --loglevel=error; \
+    # v4-ram: install yarn (classic v1) untuk install & run scripts
+    #         npm@10 tetap dipertahankan (bawaan Node, dipakai pm2 internal)
+    npm install -g npm@10 pm2 yarn --no-audit --no-fund --loglevel=error; \
     npm config set audit false --global; \
     npm config set fund false --global; \
     npm config set update-notifier false --global; \
     npm config set progress false --global; \
     npm config set prefer-offline true --global; \
+    yarn config set yarn-offline-mirror /data/root/.yarn-offline 2>/dev/null || true; \
     npm cache clean --force || true; \
-    node -v; npm -v; pm2 -v; \
+    yarn cache clean 2>/dev/null || true; \
+    node -v; npm -v; yarn -v; pm2 -v; \
     apt-get autoremove -y; apt-get clean; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
 
@@ -1198,7 +1202,7 @@ clone_or_pull() {
     || echo "[$name] WARN: clone gagal."
 }
 
-mkdir -p /data/apps /data/bin /data/root/.pm2 /data/root/.npm /data/ollama/models
+mkdir -p /data/apps /data/bin /data/root/.pm2 /data/root/.npm /data/root/.yarn /data/ollama/models
 
 clone_or_pull "kfai-nodejs" "${KFAI_REPO:-}"     "${KFAI_DIR:-/data/apps/kfai-nodejs}"  "${KFAI_BRANCH:-}" &
 clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfai-mcp}" "${KFAI_MCP_BRANCH:-}" &
@@ -1237,10 +1241,10 @@ grep -q '"@langchain/google'     package.json 2>/dev/null && PKGS="$PKGS @langch
 echo "[$APP_NAME] upgrade LangChain..."
 # Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
 export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-npm install $PKGS --save --omit=dev --include=optional \
-  --no-audit --no-fund --loglevel=error --prefer-offline \
+# v4-ram: pakai yarn add (bukan npm install)
+yarn add $PKGS --production=false \
   || echo "[$APP_NAME] WARN: upgrade gagal"
-npm cache clean --force >/dev/null 2>&1 || true
+yarn cache clean 2>/dev/null || true
 SCRIPT
 
 # ─── ensure-node-app-deps.sh ──────────────────────────────────────────────────
@@ -1272,17 +1276,23 @@ if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
 fi
 [ "$SKIP_NPM" = "true" ] && { /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true; exit 0; }
 
-echo "[$APP_NAME] npm install..."
+echo "[$APP_NAME] yarn install..."
 # Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
 export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-FLAGS="--omit=dev --include=optional --no-audit --no-fund --loglevel=error --prefer-offline"
-[ -f package-lock.json ] \
-  && npm ci $FLAGS || npm install $FLAGS
-npm rebuild --loglevel=error || true
+# v4-ram: pakai yarn (bukan npm ci/install)
+#   yarn.lock ada -> yarn install --frozen-lockfile (reproducible)
+#   yarn.lock tidak ada -> yarn install (resolve baru)
+if [ -f yarn.lock ]; then
+  yarn install --frozen-lockfile --production=false \
+    || yarn install --production=false
+else
+  yarn install --production=false
+fi
+# Yarn classic auto-rebuild native modules, tidak butuh yarn rebuild terpisah
 node -e "require.resolve('dotenv')" >/dev/null 2>&1 \
-  || npm install dotenv --save --omit=dev --no-audit --no-fund --prefer-offline
+  || yarn add dotenv --production=false
 /usr/local/bin/upgrade-langchain-packages.sh "$APP_NAME" || true
-npm cache clean --force || true
+yarn cache clean 2>/dev/null || true
 echo "[$APP_NAME] deps siap."
 SCRIPT
 
@@ -1307,8 +1317,8 @@ if [ ! -f "$ENTRY" ]; then
   done
 fi
 if [ ! -f "$ENTRY" ]; then
-  npm run 2>/dev/null | grep -qE '^\s+start\b' \
-    && exec /usr/local/bin/clear-app-port-env.sh npm start \
+  yarn run 2>/dev/null | grep -qE '^\s+start\b' \
+    && exec /usr/local/bin/clear-app-port-env.sh yarn start \
     || { echo "[$APP_NAME] entry point tidak ditemukan." >&2; sleep 10; exit 1; }
 fi
 
@@ -1391,7 +1401,7 @@ SCRIPT
 # ─── run-animest.sh ───────────────────────────────────────────────────────────
 # v3.2 — launcher script untuk aplikasi animest (https://github.com/Yz776/animest.git)
 # Pakai node_modules dari ZIP (--legacy-peer-deps sebagai fallback install)
-# Jalankan dengan: npm run start
+# Jalankan dengan: yarn start
 # Default memory 256MB (override via ANIMEST_NODE_OPTIONS / ANIMEST_MEMORY_MB di launcher)
 RUN cat > /usr/local/bin/run-animest.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1425,24 +1435,27 @@ if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
   NEED_INSTALL=false
 fi
 
-# ── Fallback: npm install --legacy-peer-deps ─────────────────────────────────
+# ── Fallback: yarn install (animest butuh dev deps untuk build frontend) ────
+#   Yarn classic TIDAK punya --legacy-peer-deps (peer deps handling lebih lenient)
+#   Yarn classic include devDependencies by default (tidak butuh --include=dev)
 if [ "$NEED_INSTALL" = "true" ]; then
   if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
-    echo "[$APP_NAME] npm install --legacy-peer-deps..."
+    echo "[$APP_NAME] yarn install..."
     export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-    npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error --prefer-offline \
-      || npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error
-    npm cache clean --force >/dev/null 2>&1 || true
+    yarn install \
+      || { echo "[$APP_NAME] WARN: yarn install gagal, coba npm --legacy-peer-deps"; \
+           npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error; }
+    yarn cache clean 2>/dev/null || true
     echo "[$APP_NAME] deps siap."
   fi
 fi
 
-echo "[$APP_NAME] build frontend: npm run build"
+echo "[$APP_NAME] build frontend: yarn build"
 export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-npm run build
+yarn build
 
-echo "[$APP_NAME] start backend: npm run start"
-exec npm run start
+echo "[$APP_NAME] start backend: yarn start"
+exec yarn start
 SCRIPT
 
 # ─── run-ollama.sh ────────────────────────────────────────────────────────────
@@ -1481,9 +1494,12 @@ RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 set +e
 ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
 ulimit -u 65535   2>/dev/null || true
-mkdir -p /data/root/.cache /data/root/.npm /data/root/.pm2 /data/tmp /data/ollama/models
-chmod 700 /data/root /data/root/.pm2 /data/root/.npm 2>/dev/null || true
+mkdir -p /data/root/.cache /data/root/.npm /data/root/.yarn /data/root/.pm2 /data/tmp /data/ollama/models
+chmod 700 /data/root /data/root/.pm2 /data/root/.npm /data/root/.yarn 2>/dev/null || true
 chmod 1777 /data/tmp /tmp 2>/dev/null || true
+# v4-ram: config yarn (bukan npm) — prefer offline, skip checks yang lambat
+yarn config set prefer-offline true 2>/dev/null || true
+yarn config set network-timeout 600000 2>/dev/null || true
 npm config set prefer-offline true --global >/dev/null 2>&1 || true
 npm config set audit false --global         >/dev/null 2>&1 || true
 npm config set fund false --global          >/dev/null 2>&1 || true
@@ -1581,7 +1597,7 @@ set -euo pipefail
 
 # ── 0. Direktori ───────────────────────────────────────────────────────────
 mkdir -p /data/root /data/ssh /data/apps /data/bin /data/launcher \
-         /data/ollama/models /run/sshd /data/root/.pm2 /data/root/.npm /data/tmp
+         /data/ollama/models /run/sshd /data/root/.pm2 /data/root/.npm /data/root/.yarn /data/tmp
 chmod 700 /data/root /data/ssh
 chmod 1777 /data/tmp /tmp || true
 
@@ -1655,7 +1671,7 @@ echo "  Edit launcher: nano /data/launcher/index.js"
 echo "  Ollama API: http://${OLLAMA_HOST:-0.0.0.0:11434}"
 echo "  Models: ${OLLAMA_MODELS:-/data/ollama/models}"
 echo
-node -v; npm -v; cloudflared --version 2>/dev/null; ollama --version 2>/dev/null; echo
+node -v; yarn -v; npm -v; cloudflared --version 2>/dev/null; ollama --version 2>/dev/null; echo
 BASHRC
 
 # ── 7. Tunggu optimasi selesai ─────────────────────────────────────────────
