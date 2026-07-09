@@ -138,7 +138,25 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     CHROMIUM_DISK_CACHE_DIR=/data/chromium-cache \
     CHROMIUM_USER_DATA_DIR=/data/chromium-profile \
     # Cap V8 heap per renderer (MB) — tab tidak bisa boros RAM
-    CHROMIUM_RENDERER_MAX_OLD_SPACE_MB=96
+    CHROMIUM_RENDERER_MAX_OLD_SPACE_MB=96 \
+    # v6.1: args tambahan untuk puppeteer.launch() di app animest (gofile, nhentai, westmanga, downloader)
+    #   App yang pakai puppeteer-extra-plugin-stealth WAJIB puppeteer.launch() — tidak bisa connect ke daemon.
+    #   Flag ini di-merge ke args[] launch via env hint (app baca process.env.CHROMIUM_LAUNCH_ARGS_EXTRA).
+    CHROMIUM_LAUNCH_ARGS_EXTRA=--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --mute-audio --disable-blink-features=AutomationControlled --disable-features=IsolateOrigins,site-per-process --disable-site-isolation-trials --disable-extensions --disable-default-apps --disable-translate --disable-sync --disable-background-networking --disable-component-update --disable-popup-blocking --disable-metrics --disable-breakpad --disable-software-rasterizer --memory-pressure-off --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-ipc-flooding-protection --no-first-run --no-default-browser-check
+
+# v6.1: puppeteer config — paksa pakai chromium sistem, JANGAN download chromium sendiri
+# File ini dibaca oleh puppeteer v13+ saat require('puppeteer').
+RUN printf '\
+const fs = require("fs");\n\
+const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";\n\
+module.exports = {\n\
+  executablePath: fs.existsSync(chromePath) ? chromePath : undefined,\n\
+  skipDownload: true,\n\
+  cache: process.env.PUPPETEER_CACHE_DIR || "/data/puppeteer-cache",\n\
+};\n' > /usr/local/lib/puppeteer.config.cjs
+
+ENV PUPPETEER_CONFIG_FILE=/usr/local/lib/puppeteer.config.cjs \
+    PUPPETEER_CACHE_DIR=/data/puppeteer-cache
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APT – tuning agar download & install secepat mungkin
@@ -164,6 +182,9 @@ RUN set -eux; \
       iputils-ping dnsutils bind9-dnsutils unzip zstd \
       build-essential python3 python3-pip \
       earlyoom nscd \
+      # v6.1: dbus + dbus-x11 — Chromium butuh system bus socket
+      #   Fix: 'Failed to connect to socket /run/dbus/system_bus_socket'
+      dbus dbus-x11 \
       # Chromium untuk Puppeteer shared-daemon (1 binary sistem, bukan per-app)
       chromium chromium-sandbox \
       fonts-noto-cjk fonts-noto-color-emoji \
@@ -287,8 +308,10 @@ RUN set -eux; \
     mkdir -p /run/sshd /etc/ssh/sshd_config.d \
              /data/root /data/ssh /data/apps /data/bin /data/launcher \
              /data/ollama/models \
-             /data/chromium-cache /data/chromium-profile; \
-    chmod 1777 /data/chromium-cache /data/chromium-profile; \
+             /data/chromium-cache /data/chromium-profile \
+             /data/puppeteer-cache /run/dbus; \
+    chmod 1777 /data/chromium-cache /data/chromium-profile /data/puppeteer-cache; \
+    chmod 755 /run/dbus; \
     chmod 700 /data/root /data/ssh; \
     rm -rf /root; \
     ln -s /data/root /root; \
@@ -1800,6 +1823,54 @@ function stats() {
 module.exports = { withPage, acquire, release, stats, getBrowser };
 POOLEOF
 
+# ─── init-dbus.sh — start dbus-daemon untuk Chromium ──────────────────────────
+# v6.1: Fix 'Failed to connect to socket /run/dbus/system_bus_socket'
+# Chromium butuh system bus untuk beberapa fitur (notification, portal, dll).
+# Tanpa ini, launch Chromium keluarkan 6 baris ERROR dbus di log per launch.
+RUN cat > /usr/local/bin/init-dbus.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set +e
+mkdir -p /run/dbus /var/run/dbus
+# Generate config default kalau belum ada (idempotent)
+if [ ! -f /etc/dbus-1/system.conf ] && command -v dbus-daemon >/dev/null 2>&1; then
+  # Pakai config minimal yang listen di unix:/run/dbus/system_bus_socket
+  cat > /tmp/dbus-system.conf <<'CONF'
+<!DOCTYPE busconfig PUBLIC
+ "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <listen>unix:path=/run/dbus/system_bus_socket</listen>
+  <auth>EXTERNAL</auth>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+CONF
+  cp /tmp/dbus-system.conf /etc/dbus-1/system.conf
+  rm -f /tmp/dbus-system.conf
+fi
+# Start dbus-daemon kalau belum running
+if command -v dbus-daemon >/dev/null 2>&1; then
+  if [ ! -S /run/dbus/system_bus_socket ]; then
+    dbus-daemon --system --fork --nopidfile 2>/dev/null \
+      && echo "[init-dbus] dbus-daemon started" \
+      || echo "[init-dbus] WARN: dbus-daemon start gagal (non-fatal)"
+  else
+    echo "[init-dbus] socket sudah ada, skip"
+  fi
+else
+  echo "[init-dbus] dbus-daemon tidak tersedia, skip"
+fi
+# Set DBUS_SESSION_BUS_ADDRESS & DBUS_SYSTEM_BUS_ADDRESS untuk semua child process
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket"
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket"
+SCRIPT
+
 # ─── optimize-system.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1942,6 +2013,9 @@ sleep 1
 /usr/local/bin/optimize-system.sh &
 /usr/local/bin/resource-optimizer.sh &
 
+# ── 1b. v6.1: Start dbus untuk Chromium (fix 'Failed to connect to bus') ────
+/usr/local/bin/init-dbus.sh
+
 # ── 2. SSH host keys ───────────────────────────────────────────────────────
 if [ ! -f /data/ssh/ssh_host_ed25519_key ]; then
   echo "SSH: copy pre-generated host keys..."
@@ -2038,6 +2112,18 @@ fi
 
 /usr/sbin/sshd -D -e &
 /usr/local/bin/oom-watchdog.sh &
+
+# ── 9c. v6.1: Pastikan /dev/shm cukup besar untuk Chromium ─────────────────
+# Chromium pakai /dev/shm untuk shared memory antar proses. Default container
+# sering cuma 64MB — bikin crash tab banyak. Mount tmpfs kalau belum besar.
+SHM_SIZE_MB=$(df -m /dev/shm 2>/dev/null | awk 'NR==2{print $2}')
+if [ -n "${SHM_SIZE_MB:-}" ] && [ "${SHM_SIZE_MB}" -lt 256 ] 2>/dev/null; then
+  echo "[start-all] /dev/shm hanya ${SHM_SIZE_MB}MB, mount tmpfs 512MB"
+  mount -t tmpfs -o size=512m,mode=1777 tmpfs /dev/shm 2>/dev/null || true
+fi
+# Set TMPDIR ke /data/tmp (lebih besar dari default /tmp di container kecil)
+export TMPDIR=/data/tmp
+mkdir -p "$TMPDIR" 2>/dev/null || true
 
 # ── 10. Tunggu bootstrap repo selesai ──────────────────────────────────────
 wait $BOOTSTRAP_PID || echo "WARN: bootstrap selesai dengan error."
@@ -2141,6 +2227,7 @@ RUN chmod +x \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-ollama.sh \
       /usr/local/bin/run-chromium-daemon.sh \
+      /usr/local/bin/init-dbus.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
