@@ -1,45 +1,17 @@
-# syntax=docker/dockerfile:1.6
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# v6 — Puppeteer-at-scale: shared Chromium daemon + tab pool
-#   • v5 base tetap: debian:bookworm-slim (lebih ringan dari Ubuntu)
-#   • TAMBAH: 1 Chromium daemon persisten (1 proses ~200-400MB) untuk SEMUA app
-#     - App pakai puppeteer.connect() ke ws://127.0.0.1:9222, BUKAN puppeteer.launch()
-#     - Helper /usr/local/lib/chromium-pool.js: withPage(fn) bounded pool (default 64 tab)
-#     - 'Miliaran proses' = jutaan panggilan withPage() di-antri di pool, RAM tetap kecil
-#   • Chromium low-mem flags: --no-zygote, --disable-site-isolation, --js-flags heap cap,
-#     --disk-cache-dir (cache di disk bukan RAM), --disable-gpu, dll
-#   • zram swap (zstd, 50% RAM) untuk kompresi in-memory saat tab banyak
-#   • Tuning network: ip_local_port_range, tcp_max_tw_buckets untuk koneksi masif
-#   • Bump fs.file-max 4M, ulimit -n 4M (jutaan FD untuk jutaan tab)
-#   • oom-watchdog: protect chromium main, prefer kill renderer (auto-respawn)
-#   • Redistribusi memori 6-app -> 7-app: chromium-daemon 12%, app lain turun proporsional
-# ═══════════════════════════════════════════════════════════════════════════════
 FROM debian:bookworm-slim
 
-# SHELL dengan pipefail agar pipeline gagal ketika ada step yang gagal
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Metadata image (OCI standard labels)
-ARG BUILD_DATE=unknown
-ARG VCS_REF=unknown
-LABEL org.opencontainers.image.title="kfai-multi-app" \
-      org.opencontainers.image.description="Lightweight multi-app container (Debian Bookworm-slim, no cloud storage)" \
-      org.opencontainers.image.source="https://github.com/Yz776/kali-linux" \
-      org.opencontainers.image.base.name="debian:bookworm-slim" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.version="6.0"
+# v5-minimal: base image diganti ke debian:bookworm-slim (lebih ringan dari Ubuntu 24.04)
+#   - Fix nama paket: libasound2t64 -> libasound2, libcups2t64 -> libcups2 (suffix t64 Ubuntu-only)
+#   - Sisanya dikembalikan ke kondisi original commit c4ac247
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-# Catatan perubahan (v6 — Puppeteer-at-scale + Debian Bookworm-slim):
-#   • v5 base tetap: debian:bookworm-slim (lebih ringan & stabil dari Ubuntu 24.04)
-#   • v6 — TAMBAH shared Chromium daemon + chromium-pool.js untuk concurrency tinggi
-#   • v6 — zram swap, network tuning, bump FD limit untuk jutaan koneksi
-#   • v5 — HAPUS nexcloud (cloud storage), redistribusi memori
-#   • v5 — HEALTHCHECK, SHELL pipefail, LABEL metadata, STOPSIGNAL, retry Ollama
+# Catatan perubahan (v4 — Ubuntu 24.04 + Ollama):
+#   • Base image: ubuntu:24.04 (lebih stabil dari Kali Rolling)
+#   • Ditambah service Ollama (LLM lokal) dijalankan via PM2/adaptive launcher
+#   • Ollama models disimpan di /data/ollama (persistent)
+#   • v3.2 — tambah aplikasi "animest" (https://github.com/Yz776/animest.git)
 #   • v4 — tambah Ollama service, pm2 start "ollama serve" --name animest
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Jakarta \
@@ -110,6 +82,8 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     KFAI_MCP_BRANCH=master \
     TTT_REPO=https://github.com/Yz776/ttt.git \
     TTT_BRANCH= \
+    NEXCLOUD_REPO=https://github.com/Yz776/nexcloud.git \
+    NEXCLOUD_BRANCH= \
     CATUR_REPO=https://github.com/Yz776/catur.git \
     CATUR_BRANCH= \
     ANIMEST_REPO=https://github.com/Yz776/animest.git \
@@ -117,46 +91,10 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
+    NEXCLOUD_DIR=/data/apps/nexcloud \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
-    LAUNCHER_DIR=/data/launcher \
-    # ── Puppeteer-at-scale (single shared Chromium daemon + tab pool) ──
-    # Semua app Node yang pakai puppeteer.connect() ke daemon ini,
-    # BUKAN puppeteer.launch() — 1 browser shared, jutaan tab hemat RAM.
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_SKIP_DOWNLOAD=true \
-    CHROMIUM_REMOTE_DEBUGGING_HOST=127.0.0.1 \
-    CHROMIUM_REMOTE_DEBUGGING_PORT=9222 \
-    PUPPETEER_WS_ENDPOINT=ws://127.0.0.1:9222 \
-    # Bound concurrency pool — antri 'miliaran proses' tanpa meledak RAM
-    PUPPETEER_MAX_CONCURRENT_TABS=64 \
-    PUPPETEER_TAB_IDLE_TTL_MS=60000 \
-    PUPPETEER_TAB_HARD_TTL_MS=300000 \
-    PUPPETEER_NAV_TIMEOUT_MS=30000 \
-    # Disk-backed cache agar RAM tidak membengkak karena cache web
-    CHROMIUM_DISK_CACHE_DIR=/data/chromium-cache \
-    CHROMIUM_USER_DATA_DIR=/data/chromium-profile \
-    # Cap V8 heap per renderer (MB) — tab tidak bisa boros RAM
-    CHROMIUM_RENDERER_MAX_OLD_SPACE_MB=96 \
-    # v6.1: args tambahan untuk puppeteer.launch() di app animest (gofile, nhentai, westmanga, downloader)
-    #   App yang pakai puppeteer-extra-plugin-stealth WAJIB puppeteer.launch() — tidak bisa connect ke daemon.
-    #   Flag ini di-merge ke args[] launch via env hint (app baca process.env.CHROMIUM_LAUNCH_ARGS_EXTRA).
-    CHROMIUM_LAUNCH_ARGS_EXTRA="--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --mute-audio --disable-blink-features=AutomationControlled --disable-features=IsolateOrigins,site-per-process --disable-site-isolation-trials --disable-extensions --disable-default-apps --disable-translate --disable-sync --disable-background-networking --disable-component-update --disable-popup-blocking --disable-metrics --disable-breakpad --disable-software-rasterizer --memory-pressure-off --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-ipc-flooding-protection --no-first-run --no-default-browser-check"
-
-# v6.1: puppeteer config — paksa pakai chromium sistem, JANGAN download chromium sendiri
-# File ini dibaca oleh puppeteer v13+ saat require('puppeteer').
-RUN printf '\
-const fs = require("fs");\n\
-const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";\n\
-module.exports = {\n\
-  executablePath: fs.existsSync(chromePath) ? chromePath : undefined,\n\
-  skipDownload: true,\n\
-  cache: process.env.PUPPETEER_CACHE_DIR || "/data/puppeteer-cache",\n\
-};\n' > /usr/local/lib/puppeteer.config.cjs
-
-ENV PUPPETEER_CONFIG_FILE=/usr/local/lib/puppeteer.config.cjs \
-    PUPPETEER_CACHE_DIR=/data/puppeteer-cache
+    LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APT – tuning agar download & install secepat mungkin
@@ -182,12 +120,6 @@ RUN set -eux; \
       iputils-ping dnsutils bind9-dnsutils unzip zstd \
       build-essential python3 python3-pip \
       earlyoom nscd \
-      # v6.1: dbus + dbus-x11 — Chromium butuh system bus socket
-      #   Fix: 'Failed to connect to socket /run/dbus/system_bus_socket'
-      dbus dbus-x11 \
-      # Chromium untuk Puppeteer shared-daemon (1 binary sistem, bukan per-app)
-      chromium chromium-sandbox \
-      fonts-noto-cjk fonts-noto-color-emoji \
     ; \
     # Security tools (beberapa mungkin tidak ada di Ubuntu, fallback gracefully)
     for pkg in \
@@ -286,18 +218,8 @@ RUN set -eux; \
 # LAYER 3B – Ollama (LLM lokal — https://ollama.com)
 # Models disimpan di /data/ollama/models (persistent via volume)
 # ═══════════════════════════════════════════════════════════════════════════════
-# v5: retry 3x download installer Ollama agar build tidak gagal karena network blip
 RUN set -eux; \
-    for i in 1 2 3; do \
-      curl -fsSL --retry 3 --retry-delay 5 https://ollama.com/install.sh -o /tmp/ollama-install.sh && break; \
-      echo "[ollama] retry download installer ($i/3)..."; sleep 5; \
-    done; \
-    if [ -f /tmp/ollama-install.sh ] && [ -s /tmp/ollama-install.sh ]; then \
-      sh /tmp/ollama-install.sh; \
-      rm -f /tmp/ollama-install.sh; \
-    else \
-      echo "WARN: ollama install gagal download — service akan skip di runtime"; \
-    fi; \
+    curl -fsSL https://ollama.com/install.sh | sh; \
     ollama --version || echo "WARN: ollama version check gagal"; \
     mkdir -p /data/ollama/models
 
@@ -307,11 +229,7 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p /run/sshd /etc/ssh/sshd_config.d \
              /data/root /data/ssh /data/apps /data/bin /data/launcher \
-             /data/ollama/models \
-             /data/chromium-cache /data/chromium-profile \
-             /data/puppeteer-cache /run/dbus; \
-    chmod 1777 /data/chromium-cache /data/chromium-profile /data/puppeteer-cache; \
-    chmod 755 /run/dbus; \
+             /data/ollama/models; \
     chmod 700 /data/root /data/ssh; \
     rm -rf /root; \
     ln -s /data/root /root; \
@@ -388,7 +306,7 @@ EOF
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 // /data/launcher/index.js  (v4 — Ubuntu 24.04 + Ollama/animest)
-// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt,
+// Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt, nexcloud,
 // catur, ollama (animest), cloudflared dengan dynamic memory allocation,
 // CPU priority adaptif, graduated pressure response.
 // TIDAK pernah restart app karena alasan memory — limitnya yang berubah.
@@ -403,7 +321,7 @@ RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 //   HIGH_CPU_PERCENT=18
 //   NORMAL_NICE=5  FOCUS_NICE=1  STARVE_SAFE_NICE=6
 //   APP_MEM_BUDGET_PERCENT=75    -> cap total app memory
-//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB
+//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / NEXCLOUD_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB
 //   MEM_GUARD_SOFT_RATIO=1.15  MEM_GUARD_HARD_RATIO=1.45
 //   MEM_GUARD_MAX_STRIKES=3    MEM_GUARD_WINDOW_MS=60000  MEM_GUARD_INTERVAL_MS=8000
 //   CRASH_LOOP_WINDOW_MS=300000  CRASH_LOOP_MAX=8
@@ -420,11 +338,10 @@ const path = require('path');
 const KFAI_DIR     = process.env.KFAI_DIR     || '/data/apps/kfai-nodejs';
 const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
+const NEXCLOUD_DIR = process.env.NEXCLOUD_DIR || '/data/apps/nexcloud';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 const OLLAMA_DIR   = process.env.OLLAMA_DIR   || '/data/ollama';
-// Chromium daemon dir (shared browser untuk semua app Puppeteer)
-const CHROMIUM_PROFILE_DIR = process.env.CHROMIUM_USER_DATA_DIR || '/data/chromium-profile';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -459,16 +376,13 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v6 (7 app — +chromium-daemon shared browser):
-//   kfai 28%, mcp 20%, ollama 18%, chromium 12%, ttt 8%, catur 8%, cf 6%
+// Distribusi v4 (7 app): kfai 28%, mcp 20%, ollama 18%, ttt 9%, nexcloud 9%, catur 10%, cf 6%
 const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.28)));
 const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.20)));
 const OLLAMA_MEM   = Number(process.env.OLLAMA_MEMORY_MB   || Math.min(768,  Math.floor(APP_BUDGET_MB * 0.18)));
-// Chromium daemon: 1 browser process shared untuk SEMUA tab Puppeteer
-// 12% budget cukup untuk ~200-400 tab aktif di RAM kecil (10-30MB/tab)
-const CHROMIUM_MEM = Number(process.env.CHROMIUM_MEMORY_MB || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.12)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.08)));
-const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.08)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
+const NEXCLOUD_MEM = Number(process.env.NEXCLOUD_MEMORY_MB  || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.10)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
@@ -513,16 +427,6 @@ const APPS = [
     priority: 9,
   },
   {
-    // Chromium shared daemon — SEMUA app Puppeteer connect ke sini via
-    // puppeteer.connect({browserWSEndpoint: process.env.PUPPETEER_WS_ENDPOINT})
-    // Bukan puppeteer.launch()! Prioritas tinggi karena jika mati, semua tab mati.
-    name:     'chromium-daemon',
-    script:   '/usr/local/bin/run-chromium-daemon.sh',
-    memoryMB: CHROMIUM_MEM,
-    nice:     NORMAL_NICE - 2,  // sedikit lebih prioritas dari app biasa
-    priority: 9,                // sama penting dengan mcp
-  },
-  {
     name:     'cloudflared-ssh',
     script:   '/usr/local/bin/run-cloudflared.sh',
     memoryMB: CF_MEM,
@@ -540,6 +444,13 @@ const APPS = [
     name:     'ttt',
     script:   '/usr/local/bin/run-ttt.sh',
     memoryMB: TTT_MEM,
+    nice:     NORMAL_NICE,
+    priority: 5,
+  },
+  {
+    name:     'nexcloud',
+    script:   '/usr/local/bin/run-nexcloud.sh',
+    memoryMB: NEXCLOUD_MEM,
     nice:     NORMAL_NICE,
     priority: 5,
   },
@@ -785,7 +696,7 @@ function checkMemoryPressure() {
       pressureLevel = 1;
     }
     for (const app of APPS) {
-      if (app.name === 'cloudflared-ssh' || app.name === 'ollama' || app.name === 'chromium-daemon') continue;
+      if (app.name === 'cloudflared-ssh' || app.name === 'ollama') continue;
       const child = children.get(app.name);
       if (!child?.pid) continue;
       const rss = readRssMB(child.pid) || 0;
@@ -801,7 +712,7 @@ function checkMemoryPressure() {
     }
     let lowest = null; let lowestPri = Infinity;
     for (const app of APPS) {
-      if (app.name === 'cloudflared-ssh' || app.name === 'ollama' || app.name === 'chromium-daemon' || app.name === INTERACTIVE_APP) continue;
+      if (app.name === 'cloudflared-ssh' || app.name === 'ollama' || app.name === INTERACTIVE_APP) continue;
       if (!children.has(app.name)) continue;
       if (app.priority < lowestPri) { lowestPri = app.priority; lowest = app; }
     }
@@ -820,7 +731,7 @@ function checkMemoryPressure() {
     pressureLevel = 3;
     let victim = null; let lowestPri = Infinity;
     for (const app of APPS) {
-      if (app.name === 'cloudflared-ssh' || app.name === 'ollama' || app.name === 'chromium-daemon' || app.name === INTERACTIVE_APP) continue;
+      if (app.name === 'cloudflared-ssh' || app.name === 'ollama' || app.name === INTERACTIVE_APP) continue;
       if (!children.has(app.name)) continue;
       if (app.priority < lowestPri) { lowestPri = app.priority; victim = app; }
     }
@@ -1036,9 +947,7 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v6 — Debian + Ollama + shared Chromium daemon (Puppeteer-at-scale)`);
-console.log(`[LAUNCHER] puppeteer WS: ${process.env.PUPPETEER_WS_ENDPOINT || 'ws://127.0.0.1:9222'}`);
-console.log(`[LAUNCHER] max concurrent tabs: ${process.env.PUPPETEER_MAX_CONCURRENT_TABS || 64}`);
+console.log(`[LAUNCHER] v4 — Ubuntu 24.04 + Ollama (animest)`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
@@ -1136,26 +1045,7 @@ MIN_FREE=$(( MEM_KB / 20 ))
 [ "$MIN_FREE" -gt 65536 ] && MIN_FREE=65536
 
 sc() { sysctl -w "$1=$2" >/dev/null 2>&1 && log "sysctl $1=$2" || true; }
-# v6: zram swap (RAM kompresi in-memory) — dramatis untuk banyak tab Chromium
-# Container biasanya tidak bisa modprobe, jadi wrap dengan cek
-if command -v modprobe >/dev/null 2>&1 && [ ! -e /dev/zram0 ]; then
-  modprobe zram num_devices=1 2>/dev/null && log "zram: module loaded" || true
-fi
-if [ -e /dev/zram0 ] && ! swapon -s 2>/dev/null | grep -q zram0; then
-  echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-  # zram size = 50% RAM (cap 2GB), kompresi zstd biasanya 3-4x
-  ZRAM_SIZE=$(( MEM_KB / 2 ))
-  [ "$ZRAM_SIZE" -gt 2097152 ] && ZRAM_SIZE=2097152
-  echo "$ZRAM_SIZE"K > /sys/block/zram0/disksize 2>/dev/null || true
-  mkswap /dev/zram0 2>/dev/null && swapon -p 100 /dev/zram0 2>/dev/null \
-    && log "zram: enabled ($(( ZRAM_SIZE / 1024 ))MB, zstd, priority 100)" || true
-fi
-# Swappiness: tinggi (60) kalau zram aktif (kompresi cepat), rendah (5) kalau tidak
-if swapon -s 2>/dev/null | grep -q zram0; then
-  sc vm.swappiness               60
-else
-  sc vm.swappiness               5
-fi
+sc vm.swappiness               5
 sc vm.dirty_ratio              20
 sc vm.dirty_background_ratio   5
 sc vm.vfs_cache_pressure       50
@@ -1163,29 +1053,22 @@ sc vm.overcommit_memory        1
 sc vm.min_free_kbytes          "$MIN_FREE"
 sc kernel.sched_migration_cost_ns  500000
 sc kernel.sched_autogroup_enabled  1
-# Network tuning untuk many concurrent Puppeteer connections
 sc net.ipv4.tcp_keepalive_time     30
 sc net.ipv4.tcp_keepalive_intvl    10
 sc net.ipv4.tcp_keepalive_probes   5
 sc net.ipv4.tcp_fastopen           3
 sc net.ipv4.tcp_tw_reuse           1
 sc net.ipv4.tcp_fin_timeout        30
-sc net.ipv4.ip_local_port_range    "1024 65535"
-sc net.ipv4.tcp_max_tw_buckets     2000000
-sc net.ipv4.tcp_max_syn_backlog    65535
 sc net.core.rmem_max               16777216
 sc net.core.wmem_max               16777216
 sc net.core.somaxconn              65535
 sc net.core.netdev_max_backlog     5000
-# File descriptors — jutaan tab butuh jutaan FD
-sc fs.file-max                     4194304
-sc fs.nr_open                      4194304
-sc fs.inotify.max_user_watches     1048576
-sc fs.inotify.max_user_instances   4096
+sc fs.file-max                     1048576
+sc fs.inotify.max_user_watches     524288
+sc fs.inotify.max_user_instances   1024
 
-# v6: bump FD limit untuk many concurrent Puppeteer tabs
-ulimit -n 4194304 2>/dev/null || ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
-ulimit -u 262144  2>/dev/null || ulimit -u 65535   2>/dev/null || true
+ulimit -n 1048576 2>/dev/null || ulimit -n 65535 2>/dev/null || true
+ulimit -u 65535   2>/dev/null || true
 ulimit -s unlimited 2>/dev/null || true
 ulimit -c 0       2>/dev/null || true
 
@@ -1230,14 +1113,9 @@ while true; do
   protect "node.*server"          -700
   protect "node.*kfai"            -700
   protect "node.*ttt"             -700
+  protect "node.*nexcloud"        -700
   protect "node.*catur"           -700
   protect "cloudflared"           -500
-  # Chromium daemon: lindungi main process (parent browser)
-  protect "/usr/bin/chromium.*--remote-debugging-port" -900
-  # Tapi render child (tab) boleh dibunuh — auto-respawn dari daemon
-  protect "/usr/bin/chromium.*--type=renderer"     500
-  protect "/usr/bin/chromium.*--type=gpu-process"  300
-  protect "/usr/bin/chromium.*--type=zygote"      -500
   sleep 30
 done
 SCRIPT
@@ -1293,6 +1171,7 @@ mkdir -p /data/apps /data/bin /data/root/.pm2 /data/root/.npm /data/ollama/model
 clone_or_pull "kfai-nodejs" "${KFAI_REPO:-}"     "${KFAI_DIR:-/data/apps/kfai-nodejs}"  "${KFAI_BRANCH:-}" &
 clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfai-mcp}" "${KFAI_MCP_BRANCH:-}" &
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
+clone_or_pull "nexcloud"    "${NEXCLOUD_REPO:-}"  "${NEXCLOUD_DIR:-/data/apps/nexcloud}"  "${NEXCLOUD_BRANCH:-}" &
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 
@@ -1447,6 +1326,20 @@ exec /usr/local/bin/run-node-app.sh \
   "${TTT_NODE_OPTIONS:---max-old-space-size=256}"
 SCRIPT
 
+# ─── run-nexcloud.sh ──────────────────────────────────────────────────────────
+RUN cat > /usr/local/bin/run-nexcloud.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/bin/run-node-app.sh \
+  "nexcloud" \
+  "${NEXCLOUD_DIR:-/data/apps/nexcloud}" \
+  "${NEXCLOUD_ENTRY:-server.js}" \
+  "${NEXCLOUD_NODE_MODULES_ZIP:-node_modules.zip}" \
+  "${NEXCLOUD_USE_NODE_MODULES_ZIP:-true}" \
+  "${NEXCLOUD_SKIP_NPM_INSTALL:-false}" \
+  "${NEXCLOUD_NODE_OPTIONS:---max-old-space-size=256}"
+SCRIPT
+
 # ─── run-catur.sh ─────────────────────────────────────────────────────────────
 # v3.1 — launcher script untuk aplikasi catur (https://github.com/Yz776/catur.git)
 # Default memory 256MB (override via CATUR_NODE_OPTIONS / CATUR_MEMORY_MB di launcher)
@@ -1550,327 +1443,6 @@ fi
 exec cloudflared tunnel --no-autoupdate --url "${CLOUDFLARED_URL:-ssh://127.0.0.1:${SSH_PORT:-22}}"
 SCRIPT
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LAYER PUPPETEER-AT-SCALE — shared Chromium daemon + tab pool helper
-# ═══════════════════════════════════════════════════════════════════════════════
-# Arsitektur: 1 browser daemon Chromium (1 proses, ~200-400MB) melayani
-# semua tab via --remote-debugging-port. Setiap tab hanya ~10-30MB.
-# App Node connect via puppeteer.connect({browserWSEndpoint: PUPPETEER_WS_ENDPOINT})
-# Helper /usr/local/lib/chromium-pool.js menyediakan withPage(fn) bounded pool.
-#
-# MEMORI: dibanding N browser independen (N x ~250MB), shared daemon + N tabs
-#         pakai ~250MB + N x 20MB — hemat ~10x untuk N besar.
-#
-# KEAMANAN: --remote-debugging-port HANYA listen 127.0.0.1 (tidak exposed).
-#           Jangan set CHROMIUM_REMOTE_DEBUGGING_HOST=0.0.0.0 kecuali paham risiko.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ─── run-chromium-daemon.sh ──────────────────────────────────────────────────
-# Launch Chromium headless sebagai daemon dengan remote debugging.
-# Memory-saving flags (komentar penjelas di tiap baris):
-#   --headless=new              : headless mode baru (lebih efisien)
-#   --no-sandbox                : container tidak butuh sandbox (butuh CAP_SYS_ADMIN)
-#   --disable-dev-shm-usage     : pakai /tmp bukan /dev/shm (container kecil)
-#   --no-zygote                 : skip zygote process (-50MB per fork)
-#   --disable-gpu               : tanpa GPU (headless tidak butuh)
-#   --disable-software-rasterizer
-#   --disable-extensions        : no extensions
-#   --disable-default-apps      : no default apps
-#   --disable-translate         : no translate popup
-#   --disable-sync              : no account sync
-#   --disable-background-networking
-#   --disable-component-update
-#   --disable-popup-blocking    : popup tidak numpuk RAM
-#   --disable-prompt-on-repost
-#   --disable-metrics           : no UMA
-#   --disable-breakpad          : no crash reporter
-#   --disable-features=...      : matikan fitur berat
-#   --disable-site-isolation    : BIG memory saver — matikan per-origin process model
-#   --disable-features=IsolateOrigins,site-per-process
-#   --memory-pressure-off       : jangan throttle karena memory pressure
-#   --disable-background-timer-throttling : timer jangan ditrottle
-#   --disable-backgrounding-occluded-windows
-#   --disable-renderer-backgrounding
-#   --disable-ipc-flooding-protection
-#   --js-flags=--max-old-space-size=96 : cap V8 heap per renderer (MB)
-#   --disk-cache-dir=...        : cache web di disk, bukan RAM
-#   --user-data-dir=...         : profile persistent (cookies, localStorage)
-#   --remote-debugging-port=9222 : WebSocket untuk puppeteer.connect()
-#   --remote-debugging-address=127.0.0.1 : HANYA localhost
-RUN cat > /usr/local/bin/run-chromium-daemon.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-CHROMIUM_BIN="${PUPPETEER_EXECUTABLE_PATH:-/usr/bin/chromium}"
-RDEBUG_HOST="${CHROMIUM_REMOTE_DEBUGGING_HOST:-127.0.0.1}"
-RDEBUG_PORT="${CHROMIUM_REMOTE_DEBUGGING_PORT:-9222}"
-DISK_CACHE="${CHROMIUM_DISK_CACHE_DIR:-/data/chromium-cache}"
-USER_DATA="${CHROMIUM_USER_DATA_DIR:-/data/chromium-profile}"
-RENDERER_HEAP="${CHROMIUM_RENDERER_MAX_OLD_SPACE_MB:-96}"
-
-mkdir -p "$DISK_CACHE" "$USER_DATA"
-chmod 1777 "$DISK_CACHE" "$USER_DATA" 2>/dev/null || true
-
-echo "[chromium-daemon] starting: $CHROMIUM_BIN"
-echo "[chromium-daemon] remote-debugging: ws://${RDEBUG_HOST}:${RDEBUG_PORT}"
-echo "[chromium-daemon] disk-cache: $DISK_CACHE"
-echo "[chromium-daemon] user-data: $USER_DATA"
-echo "[chromium-daemon] renderer V8 heap cap: ${RENDERER_HEAP}MB"
-
-# Test binary ada
-[ -x "$CHROMIUM_BIN" ] || { echo "[chromium-daemon] FATAL: $CHROMIUM_BIN tidak ada/executable" >&2; sleep 5; exit 1; }
-
-exec "$CHROMIUM_BIN" \
-  --headless=new \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --no-zygote \
-  --disable-gpu \
-  --disable-software-rasterizer \
-  --disable-extensions \
-  --disable-default-apps \
-  --disable-translate \
-  --disable-sync \
-  --disable-background-networking \
-  --disable-component-update \
-  --disable-popup-blocking \
-  --disable-prompt-on-repost \
-  --disable-metrics \
-  --disable-breakpad \
-  --disable-features=TranslateUI,BlinkGenPropertyTrees,site-per-process,IsolateOrigins,SharedArrayBuffer,MediaRouter \
-  --disable-site-isolation \
-  --memory-pressure-off \
-  --disable-background-timer-throttling \
-  --disable-backgrounding-occluded-windows \
-  --disable-renderer-backgrounding \
-  --disable-ipc-flooding-protection \
-  --no-first-run \
-  --no-default-browser-check \
-  --enable-features=NetworkService,NetworkServiceInProcess \
-  --js-flags="--max-old-space-size=${RENDERER_HEAP} --max-semi-space-size=16" \
-  --disk-cache-dir="$DISK_CACHE" \
-  --user-data-dir="$USER_DATA" \
-  --remote-debugging-port="$RDEBUG_PORT" \
-  --remote-debugging-address="$RDEBUG_HOST" \
-  about:blank
-SCRIPT
-
-# ─── chromium-pool.js — Node helper untuk bounded tab pool ────────────────────
-# Usage di app Node:
-#   const pool = require('/usr/local/lib/chromium-pool');
-#   const html = await pool.withPage(async page => await page.content());
-#   // pool auto-akquire tab, jalankan fn, release tab ke pool
-#
-# Pool ini membatasi concurrency ke PUPPETEER_MAX_CONCURRENT_TABS (default 64).
-# Request ke-65 di-antri (queue). Tab idle > TTL di-close otomatis.
-# 'Miliaran proses' = jutaan panggilan withPage() di-antri di pool ini.
-RUN mkdir -p /usr/local/lib && cat > /usr/local/lib/chromium-pool.js <<'POOLEOF'
-// /usr/local/lib/chromium-pool.js — bounded tab pool untuk shared Chromium daemon
-// Semua app Node require modul ini; jangan puppeteer.launch() langsung.
-'use strict';
-const puppeteer = require('puppeteer');
-
-const WS = process.env.PUPPETEER_WS_ENDPOINT || 'ws://127.0.0.1:9222';
-const MAX_TABS = parseInt(process.env.PUPPETEER_MAX_CONCURRENT_TABS || '64', 10);
-const TAB_IDLE_TTL_MS = parseInt(process.env.PUPPETEER_TAB_IDLE_TTL_MS || '60000', 10);
-const TAB_HARD_TTL_MS = parseInt(process.env.PUPPETEER_TAB_HARD_TTL_MS || '300000', 10);
-const NAV_TIMEOUT_MS = parseInt(process.env.PUPPETEER_NAV_TIMEOUT_MS || '30000', 10);
-const RECONNECT_DELAY_MS = 2000;
-
-let _browser = null;
-let _connecting = null;
-const _idle = [];          // pool of free tabs
-const _waiters = [];       // queue of {resolve, reject}
-let _activeCount = 0;
-const _tabBirth = new WeakMap();
-const _tabLastUsed = new WeakMap();
-
-function log(...a)  { console.log('[chromium-pool]', ...a); }
-function warn(...a) { console.warn('[chromium-pool] WARN', ...a); }
-
-async function getBrowser() {
-  if (_browser && _browser.isConnected()) return _browser;
-  if (_connecting) return _connecting;
-  _connecting = (async () => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        _browser = await puppeteer.connect({ browserWSEndpoint: WS });
-        log('connected to', WS);
-        _browser.on('disconnected', () => {
-          warn('browser disconnected, will reconnect on next request');
-          _browser = null;
-          _idle.length = 0;  // tab references invalid
-        });
-        return _browser;
-      } catch (e) {
-        warn(`connect attempt ${attempt} failed: ${e.message}`);
-        await new Promise(r => setTimeout(r, RECONNECT_DELAY_MS));
-      }
-    }
-  })();
-  try { return await _connecting; } finally { _connecting = null; }
-}
-
-async function newTab() {
-  const browser = await getBrowser();
-  const [page] = await Promise.all([browser.newPage()]);
-  await page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-  await page.setDefaultTimeout(NAV_TIMEOUT_MS);
-  // Block resource heavy types by default (override per-call jika perlu)
-  await page.setRequestInterception(true).catch(() => {});
-  page.on('request', req => {
-    const type = req.resourceType();
-    if (type === 'image' || type === 'media' || type === 'font') {
-      req.abort().catch(() => {});
-    } else {
-      req.continue().catch(() => {});
-    }
-  });
-  _tabBirth.set(page, Date.now());
-  _tabLastUsed.set(page, Date.now());
-  return page;
-}
-
-function recycleTab(page) {
-  // Tutup tab jika sudah hard TTL atau error
-  const birth = _tabBirth.get(page) || 0;
-  if (Date.now() - birth > TAB_HARD_TTL_MS) {
-    page.close().catch(() => {});
-    return false;
-  }
-  // Reset state: clear cookies, clear cache, go to about:blank
-  page.deleteCookie({}).catch(() => {});
-  page.goto('about:blank', { waitUntil: 'domcontentloaded' }).catch(() => {});
-  _tabLastUsed.set(page, Date.now());
-  _idle.push(page);
-  return true;
-}
-
-function dispatchWaiter() {
-  if (_waiters.length === 0) return;
-  if (_idle.length > 0) {
-    const page = _idle.shift();
-    _activeCount++;
-    _waiters.shift().resolve(page);
-  } else if (_activeCount < MAX_TABS) {
-    _activeCount++;
-    newTab().then(page => _waiters.shift().resolve(page))
-            .catch(e => { _activeCount--; _waiters.shift().reject(e); });
-  }
-}
-
-async function acquire() {
-  // Coba idle dulu
-  if (_idle.length > 0) {
-    const page = _idle.shift();
-    _activeCount++;
-    _tabLastUsed.set(page, Date.now());
-    return page;
-  }
-  if (_activeCount < MAX_TABS) {
-    _activeCount++;
-    try { return await newTab(); }
-    catch (e) { _activeCount--; throw e; }
-  }
-  // Antri
-  return new Promise((resolve, reject) => {
-    _waiters.push({ resolve, reject });
-  });
-}
-
-function release(page) {
-  _activeCount = Math.max(0, _activeCount - 1);
-  if (page && !page.isClosed?.()) {
-    if (!recycleTab(page)) {
-      // tab ditutup oleh recycle karena hard TTL — biarkan
-    }
-  }
-  dispatchWaiter();
-}
-
-/**
- * withPage(fn): acquire tab, jalankan fn(page), release ke pool.
- * fn boleh return value; akan diteruskan ke caller.
- * Error di fn tetap me-release tab (dengan recycle).
- */
-async function withPage(fn) {
-  const page = await acquire();
-  try {
-    return await fn(page);
-  } finally {
-    release(page);
-  }
-}
-
-// Reaper: tutup tab idle yang sudah tidak dipakai lama
-setInterval(() => {
-  const now = Date.now();
-  for (let i = _idle.length - 1; i >= 0; i--) {
-    const page = _idle[i];
-    const last = _tabLastUsed.get(page) || 0;
-    const birth = _tabBirth.get(page) || 0;
-    if (now - last > TAB_IDLE_TTL_MS || now - birth > TAB_HARD_TTL_MS) {
-      _idle.splice(i, 1);
-      page.close().catch(() => {});
-    }
-  }
-}, 15000).unref();
-
-function stats() {
-  return { active: _activeCount, idle: _idle.length, queued: _waiters.length, max: MAX_TABS, ws: WS };
-}
-
-module.exports = { withPage, acquire, release, stats, getBrowser };
-POOLEOF
-
-# ─── init-dbus.sh — start dbus-daemon untuk Chromium ──────────────────────────
-# v6.1: Fix 'Failed to connect to socket /run/dbus/system_bus_socket'
-# Chromium butuh system bus untuk beberapa fitur (notification, portal, dll).
-# Tanpa ini, launch Chromium keluarkan 6 baris ERROR dbus di log per launch.
-RUN cat > /usr/local/bin/init-dbus.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set +e
-mkdir -p /run/dbus /var/run/dbus
-# Generate config default kalau belum ada (idempotent)
-if [ ! -f /etc/dbus-1/system.conf ] && command -v dbus-daemon >/dev/null 2>&1; then
-  # Pakai config minimal yang listen di unix:/run/dbus/system_bus_socket
-  cat > /tmp/dbus-system.conf <<'CONF'
-<!DOCTYPE busconfig PUBLIC
- "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
- "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
-<busconfig>
-  <type>system</type>
-  <listen>unix:path=/run/dbus/system_bus_socket</listen>
-  <auth>EXTERNAL</auth>
-  <auth>ANONYMOUS</auth>
-  <allow_anonymous/>
-  <policy context="default">
-    <allow send_destination="*" eavesdrop="true"/>
-    <allow eavesdrop="true"/>
-    <allow own="*"/>
-  </policy>
-</busconfig>
-CONF
-  cp /tmp/dbus-system.conf /etc/dbus-1/system.conf
-  rm -f /tmp/dbus-system.conf
-fi
-# Start dbus-daemon kalau belum running
-if command -v dbus-daemon >/dev/null 2>&1; then
-  if [ ! -S /run/dbus/system_bus_socket ]; then
-    dbus-daemon --system --fork --nopidfile 2>/dev/null \
-      && echo "[init-dbus] dbus-daemon started" \
-      || echo "[init-dbus] WARN: dbus-daemon start gagal (non-fatal)"
-  else
-    echo "[init-dbus] socket sudah ada, skip"
-  fi
-else
-  echo "[init-dbus] dbus-daemon tidak tersedia, skip"
-fi
-# Set DBUS_SESSION_BUS_ADDRESS & DBUS_SYSTEM_BUS_ADDRESS untuk semua child process
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket"
-export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket"
-SCRIPT
-
 # ─── optimize-system.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/optimize-system.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1920,7 +1492,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js v6 — Debian + Ollama + Chromium daemon)"
+  echo "Mode: adaptive launcher (index.js v4 — Ubuntu + Ollama)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1930,7 +1502,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "kfai-nodejs" "kfai-mcp" "ttt" "catur" "ollama" "cloudflared" "chromium-daemon" "adaptive-launcher"; do
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "nexcloud" "catur" "ollama" "cloudflared" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1950,27 +1522,8 @@ else
   echo "  (ollama tidak terinstall)"
 fi
 
-printf "\n${C}== Chromium daemon (Puppeteer-at-scale) ==${R}\n"
-if pgrep -f "/usr/bin/chromium.*--remote-debugging-port" >/dev/null 2>&1; then
-  echo "  status: RUNNING"
-  echo "  WS endpoint: ${PUPPETEER_WS_ENDPOINT:-ws://127.0.0.1:9222}"
-  echo "  max concurrent tabs: ${PUPPETEER_MAX_CONCURRENT_TABS:-64}"
-  # Hitung tab aktif via /json (Chromium DevTools Protocol)
-  TAB_COUNT=$(curl -sf http://${CHROMIUM_REMOTE_DEBUGGING_HOST:-127.0.0.1}:${CHROMIUM_REMOTE_DEBUGGING_PORT:-9222}/json 2>/dev/null | grep -c '"type": "page"' || echo 0)
-  echo "  active tabs: ${TAB_COUNT}"
-  # Renderer process count (bisa kasih estimasi RAM: ~ tabs x 20MB)
-  REND_COUNT=$(pgrep -c -f 'chromium.*--type=renderer' 2>/dev/null || echo 0)
-  echo "  renderer processes: ${REND_COUNT} (est RAM: $(( REND_COUNT * 20 ))MB)"
-  # Total Chromium RSS
-  CHROM_RSS=$(ps -eo rss,comm | awk '/chromium/{s+=$1} END{printf "%d", s/1024}')
-  echo "  total Chromium RSS: ${CHROM_RSS:-0}MB"
-else
-  echo "  status: NOT RUNNING (jalankan kstatus lagi setelah startup)"
-fi
-echo "  pool helper: node -e \"console.log(require('/usr/local/lib/chromium-pool').stats())\""
-
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*catur" ollama sshd cloudflared chromium; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*nexcloud" "node.*catur" ollama sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -2005,16 +1558,11 @@ chmod 1777 /data/tmp /tmp || true
 pkill -f "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null && echo "[start-all] clean stale launcher" || true
 pkill -f "PM2.*God Daemon" 2>/dev/null && echo "[start-all] clean stale PM2" || true
 pkill -f "ollama serve" 2>/dev/null && echo "[start-all] clean stale ollama" || true
-# v6: bersihkan chromium lama (daemon + renderer + gpu-process)
-pkill -f "/usr/bin/chromium" 2>/dev/null && echo "[start-all] clean stale chromium" || true
 sleep 1
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
 /usr/local/bin/optimize-system.sh &
 /usr/local/bin/resource-optimizer.sh &
-
-# ── 1b. v6.1: Start dbus untuk Chromium (fix 'Failed to connect to bus') ────
-/usr/local/bin/init-dbus.sh
 
 # ── 2. SSH host keys ───────────────────────────────────────────────────────
 if [ ! -f /data/ssh/ssh_host_ed25519_key ]; then
@@ -2074,7 +1622,6 @@ echo "  LAUNCHER_MODE=${LAUNCHER_MODE:-adaptive}  |  kstatus"
 echo "  Edit launcher: nano /data/launcher/index.js"
 echo "  Ollama API: http://${OLLAMA_HOST:-0.0.0.0:11434}"
 echo "  Models: ${OLLAMA_MODELS:-/data/ollama/models}"
-echo "  Puppeteer WS: ${PUPPETEER_WS_ENDPOINT:-ws://127.0.0.1:9222} (max tabs: ${PUPPETEER_MAX_CONCURRENT_TABS:-64})"
 echo
 node -v; npm -v; cloudflared --version 2>/dev/null; ollama --version 2>/dev/null; echo
 BASHRC
@@ -2091,12 +1638,12 @@ BOOTSTRAP_PID=$!
 # -r 3600: report interval 1 jam
 # -m 10:    trigger saat MemAvailable < 10%
 # --avoid "(^node.*adaptive|^node.*launcher|^/usr/sbin/sshd|^earlyoom|^ollama)": jangan bunuh ini
-# --prefer "(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared)": bunuh ini dulu
+# --prefer "(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)": bunuh ini dulu
 if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
-    --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2|^ollama|chromium.*--remote-debugging-port)' \
-    --prefer '(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared|chromium.*--type=renderer|chromium.*--type=gpu-process)' \
+    --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2|^ollama)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*nexcloud|^node.*catur|^cloudflared)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -2112,18 +1659,6 @@ fi
 
 /usr/sbin/sshd -D -e &
 /usr/local/bin/oom-watchdog.sh &
-
-# ── 9c. v6.1: Pastikan /dev/shm cukup besar untuk Chromium ─────────────────
-# Chromium pakai /dev/shm untuk shared memory antar proses. Default container
-# sering cuma 64MB — bikin crash tab banyak. Mount tmpfs kalau belum besar.
-SHM_SIZE_MB=$(df -m /dev/shm 2>/dev/null | awk 'NR==2{print $2}')
-if [ -n "${SHM_SIZE_MB:-}" ] && [ "${SHM_SIZE_MB}" -lt 256 ] 2>/dev/null; then
-  echo "[start-all] /dev/shm hanya ${SHM_SIZE_MB}MB, mount tmpfs 512MB"
-  mount -t tmpfs -o size=512m,mode=1777 tmpfs /dev/shm 2>/dev/null || true
-fi
-# Set TMPDIR ke /data/tmp (lebih besar dari default /tmp di container kecil)
-export TMPDIR=/data/tmp
-mkdir -p "$TMPDIR" 2>/dev/null || true
 
 # ── 10. Tunggu bootstrap repo selesai ──────────────────────────────────────
 wait $BOOTSTRAP_PID || echo "WARN: bootstrap selesai dengan error."
@@ -2157,14 +1692,14 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v6 (7 app — +chromium-daemon): kfai 28%, mcp 20%, ollama 18%, chromium 12%, ttt 8%, catur 8%, cf 6%
+// Distribusi v4 (7 app): kfai 28%, mcp 20%, ollama 18%, ttt 9%, nexcloud 9%, catur 10%, cf 6%
 const mem = {
   kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.28))+'M',
   mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.20))+'M',
   ollama:   process.env.OLLAMA_MAX_MEMORY   || Math.min(768,  Math.floor(BUDGET*0.18))+'M',
-  chromium: process.env.CHROMIUM_MAX_MEMORY || Math.min(512,  Math.floor(BUDGET*0.12))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.08))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.08))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.09))+'M',
+  nexcloud: process.env.NEXCLOUD_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.09))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.10))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -2180,9 +1715,6 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.mcp, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
-  { name:'chromium-daemon', script:'/usr/local/bin/run-chromium-daemon.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:3000,
-    exp_backoff_restart_delay:300, max_memory_restart:mem.chromium, kill_timeout:8000 },
   { name:'animest', script:'/usr/local/bin/run-ollama.sh', interpreter:'bash',
     autorestart:true, max_restarts:8, min_uptime:'15s', restart_delay:5000,
     exp_backoff_restart_delay:500, max_memory_restart:mem.ollama, kill_timeout:15000,
@@ -2193,6 +1725,10 @@ module.exports = { apps: [
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
+    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+  { name:'nexcloud', script:'/usr/local/bin/run-nexcloud.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.nexcloud, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
@@ -2223,23 +1759,14 @@ RUN chmod +x \
       /usr/local/bin/run-kfai-nodejs.sh \
       /usr/local/bin/run-kfai-mcp.sh \
       /usr/local/bin/run-ttt.sh \
+      /usr/local/bin/run-nexcloud.sh \
       /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-ollama.sh \
-      /usr/local/bin/run-chromium-daemon.sh \
-      /usr/local/bin/init-dbus.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
       /usr/local/bin/start-all.sh
-
-# ─── Stabilisasi: Healthcheck + stop signal ─────────────────────────────────
-# Cek SSH port setiap 60s; start-period 60s agar container stabil dulu sebelum dicek
-HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
-  CMD ss -lnt | grep -q ":${SSH_PORT:-22}\b" || exit 1
-
-# Pastikan SIGTERM diterima dengan baik oleh tini/sshd/launcher saat docker stop
-STOPSIGNAL SIGTERM
 
 EXPOSE 22 11434
 
