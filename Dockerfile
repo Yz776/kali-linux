@@ -207,7 +207,8 @@ RUN set -eux; \
 RUN set -eux; \
     curl -fsSL --retry 3 https://deb.nodesource.com/setup_20.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
-    npm install -g npm@latest pm2 --no-audit --no-fund --loglevel=error; \
+    # v4-ram: pin npm@10 (npm@latest=v12 butuh Node 22+, incompatible dgn Node 20)
+    npm install -g npm@10 pm2 --no-audit --no-fund --loglevel=error; \
     npm config set audit false --global; \
     npm config set fund false --global; \
     npm config set update-notifier false --global; \
