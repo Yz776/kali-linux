@@ -43,7 +43,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PM2_HOME=/data/root/.pm2 \
     NPM_CONFIG_CACHE=/data/root/.npm \
     YARN_CACHE_FOLDER=/data/root/.yarn \
-    PATH="/data/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    BUN_INSTALL=/data/root/.bun \
+    PATH="/data/root/.local/bin:/data/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     # Git
     GIT_TERMINAL_PROMPT=0 \
     GIT_HTTP_LOW_SPEED_LIMIT=1000 \
@@ -228,6 +229,21 @@ RUN set -eux; \
     curl -fsSL https://ollama.com/install.sh | sh; \
     ollama --version || echo "WARN: ollama version check gagal"; \
     mkdir -p /data/ollama/models
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 3C – Bun (JavaScript runtime — https://bun.sh)
+# Dipasang ke /data/root/.bun (persistent, selamat dari wipe /root di LAYER 4).
+# Setelah LAYER 4: /root → /data/root, jadi /root/.bun/bin/bun juga callable.
+# Symlink /usr/local/bin/bun → /data/root/.bun/bin/bun supaya callable system-wide
+# bahkan sebelum /root di-symlink (mis. saat build steps berikutnya butuh bun).
+# ═══════════════════════════════════════════════════════════════════════════════
+RUN set -eux; \
+    mkdir -p /data/root/.bun; \
+    export BUN_INSTALL=/data/root/.bun; \
+    curl -fsSL https://bun.sh/install | bash; \
+    ln -sf /data/root/.bun/bin/bun /usr/local/bin/bun; \
+    which bun; \
+    bun --version
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 – Direktori + SSH host keys pre-generated
