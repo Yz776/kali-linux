@@ -210,9 +210,24 @@ RUN set -eux; \
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 3 – Node.js 20 + PM2
 # ═══════════════════════════════════════════════════════════════════════════════
+# v6.1: ganti NodeSource (sering 403 / signing key deprecated) dengan binary
+#       tarball resmi dari nodejs.org. Lebih stabil, tidak butuh apt-repo,
+#       tidak butuh signing key. Single-platform build (linux/amd64) jadi
+#       cukup download 1 tarball linux-x64.
 RUN set -eux; \
-    curl -fsSL --retry 3 https://deb.nodesource.com/setup_20.x | bash -; \
-    apt-get install -y --no-install-recommends nodejs; \
+    NODE_VERSION=20.20.2; \
+    NODE_TARBALL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    NODE_SHASUMS="https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+    echo "[LAYER 3] downloading Node.js v${NODE_VERSION} from ${NODE_TARBALL}"; \
+    curl -fsSL --retry 5 --retry-delay 3 "${NODE_TARBALL}" -o /tmp/node.tar.xz; \
+    curl -fsSL --retry 5 --retry-delay 3 "${NODE_SHASUMS}" -o /tmp/SHASUMS256.txt; \
+    expected="$(grep "node-v${NODE_VERSION}-linux-x64.tar.xz\$" /tmp/SHASUMS256.txt | awk '{print $1}')"; \
+    actual="$(sha256sum /tmp/node.tar.xz | awk '{print $1}')"; \
+    [ -n "$expected" ] || { echo "Cannot find checksum in SHASUMS256.txt" >&2; exit 1; }; \
+    [ "$expected" = "$actual" ] || { echo "SHA256 mismatch: expected=$expected actual=$actual" >&2; exit 1; }; \
+    echo "[LAYER 3] sha256 OK ($actual)"; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
+    rm /tmp/node.tar.xz /tmp/SHASUMS256.txt; \
     # v4-ram: install yarn (classic v1) untuk install & run scripts
     #         npm@10 tetap dipertahankan (bawaan Node, dipakai pm2 internal)
     npm install -g npm@10 pm2 yarn --no-audit --no-fund --loglevel=error; \
@@ -225,8 +240,7 @@ RUN set -eux; \
     npm cache clean --force || true; \
     yarn cache clean 2>/dev/null || true; \
     node -v; npm -v; yarn -v; pm2 -v; \
-    apt-get autoremove -y; apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*
+    rm -rf /tmp/* /var/tmp/*
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 3C – Bun (JavaScript runtime — https://bun.sh)
