@@ -3,7 +3,13 @@ FROM ubuntu:24.04
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-# Catatan perubahan (v4-ram — Ubuntu 24.04 + tuning hemat RAM tambahan):
+# Catatan perubahan:
+#   • v5 — tambah aplikasi "apis" (https://github.com/Yz776/apis.git)
+#          Bun + Elysia REST API (142 endpoints, port 47291 default, /docs = Swagger UI)
+#          Berjalan di PM2 (mode pm2) atau adaptive launcher (mode adaptive)
+#          Membutuhkan LAYER 3C (Bun) — install bun sebelum run-apis.sh
+#          Realokasi memori: kfai 32%→27% untuk apis 5% (total tetap 100%)
+#   • v4-ram — Ubuntu 24.04 + tuning hemat RAM tambahan:
 #   • Base image: ubuntu:24.04 (kembali ke original)
 #   • Tambahan tuning hemat RAM di resource-optimizer.sh:
 #     - zram swap (zstd, 50% RAM, cap 2GB) — kompresi in-memory
@@ -92,11 +98,14 @@ ENV KFAI_REPO=https://github.com/Yz776/kfai-nodejs.git \
     CATUR_BRANCH= \
     ANIMEST_REPO=https://github.com/Yz776/animest.git \
     ANIMEST_BRANCH= \
+    APIS_REPO=https://github.com/Yz776/apis.git \
+    APIS_BRANCH= \
     KFAI_DIR=/data/apps/kfai-nodejs \
     KFAI_MCP_DIR=/data/apps/kfai-mcp \
     TTT_DIR=/data/apps/ttt \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
+    APIS_DIR=/data/apps/apis \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -327,7 +336,7 @@ EOF
 #   • PM2 start "ollama serve" --name animest
 # ═══════════════════════════════════════════════════════════════════════════════
 RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
-// /data/launcher/index.js  (v4 — Ubuntu 24.04 + Ollama/animest)
+// /data/launcher/index.js  (v5 — Ubuntu 24.04 + Ollama/animest + apis/Bun)
 // Adaptive multi-app launcher – mengelola kfai-nodejs, kfai-mcp, ttt,
 // catur, ollama (animest), cloudflared dengan dynamic memory allocation,
 // CPU priority adaptif, graduated pressure response.
@@ -343,7 +352,7 @@ RUN cat > /data/launcher/index.js <<'LAUNCHEREOF'
 //   HIGH_CPU_PERCENT=18
 //   NORMAL_NICE=5  FOCUS_NICE=1  STARVE_SAFE_NICE=6
 //   APP_MEM_BUDGET_PERCENT=75    -> cap total app memory
-//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB
+//   KFAI_MEMORY_MB / KFAI_MCP_MEMORY_MB / TTT_MEMORY_MB / CATUR_MEMORY_MB / OLLAMA_MEMORY_MB / CF_MEMORY_MB / APIS_MEMORY_MB
 //   MEM_GUARD_SOFT_RATIO=1.15  MEM_GUARD_HARD_RATIO=1.45
 //   MEM_GUARD_MAX_STRIKES=3    MEM_GUARD_WINDOW_MS=60000  MEM_GUARD_INTERVAL_MS=8000
 //   CRASH_LOOP_WINDOW_MS=300000  CRASH_LOOP_MAX=8
@@ -362,6 +371,7 @@ const KFAI_MCP_DIR = process.env.KFAI_MCP_DIR || '/data/apps/kfai-mcp';
 const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
+const APIS_DIR     = process.env.APIS_DIR     || '/data/apps/apis';
 const OLLAMA_DIR   = process.env.OLLAMA_DIR   || '/data/ollama';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'kfai-nodejs').trim();
@@ -397,10 +407,11 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v4-ram (6 app — nexcloud dihapus): kfai 32%, mcp 22%, ollama 20%, ttt 10%, catur 10%, cf 6%
-const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(1024, Math.floor(APP_BUDGET_MB * 0.32)));
+// Distribusi v5 (7 app — tambah apis Bun): kfai 27%, mcp 22%, ollama 20%, apis 5%, ttt 10%, catur 10%, cf 6%
+const KFAI_MEM     = Number(process.env.KFAI_MEMORY_MB     || Math.min(896,  Math.floor(APP_BUDGET_MB * 0.27)));
 const KFAI_MCP_MEM = Number(process.env.KFAI_MCP_MEMORY_MB || Math.min(1280, Math.floor(APP_BUDGET_MB * 0.22)));
 const OLLAMA_MEM   = Number(process.env.OLLAMA_MEMORY_MB   || Math.min(768,  Math.floor(APP_BUDGET_MB * 0.20)));
+const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(256,  Math.floor(APP_BUDGET_MB * 0.05)));
 const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.10)));
 const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.10)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.09)));
@@ -473,6 +484,13 @@ const APPS = [
     memoryMB: CATUR_MEM,
     nice:     NORMAL_NICE,
     priority: 5,
+  },
+  {
+    name:     'apis',
+    script:   '/usr/local/bin/run-apis.sh',
+    memoryMB: APIS_MEM,
+    nice:     NORMAL_NICE,
+    priority: 4, // Bun + Elysia REST API (port 47291) — prioritas lebih rendah dari app utama
   },
 ];
 
@@ -960,7 +978,7 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v4 — Ubuntu 24.04 + Ollama (animest)`);
+console.log(`[LAUNCHER] v5 — Ubuntu 24.04 + Ollama (animest) + apis (Bun)`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
@@ -1212,6 +1230,7 @@ clone_or_pull "kfai-mcp"    "${KFAI_MCP_REPO:-}" "${KFAI_MCP_DIR:-/data/apps/kfa
 clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"            "${TTT_BRANCH:-}" &
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
+clone_or_pull "apis"        "${APIS_REPO:-}"      "${APIS_DIR:-/data/apps/apis}"          "${APIS_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1446,6 +1465,53 @@ echo "[$APP_NAME] start backend: yarn start"
 exec yarn start
 SCRIPT
 
+# ─── run-apis.sh ──────────────────────────────────────────────────────────────
+# v5 — launcher script untuk aplikasi apis (https://github.com/Yz776/apis.git)
+# Bun + Elysia REST API (142 endpoints, port 47291 default, /docs = Swagger UI)
+# Install: bun install (langsung pakai bun.lock bila ada — reproducible)
+# Run:     bun run index.js   (entry: package.json → main = index.js)
+# Default memory 256MB (override via APIS_MEMORY_MB di launcher atau --max-old-space-size
+# di APIS_NODE_OPTIONS — catatan: Bun hanya baca sebagian V8 flags, memory limit
+# diatur terutama via max_memory_restart di PM2 / dynamicLimit di adaptive launcher)
+RUN cat > /usr/local/bin/run-apis.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="apis"
+APP_DIR="${APIS_DIR:-/data/apps/apis}"
+
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+cd "$APP_DIR"
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
+
+# Bun wajib tersedia (dipasang di LAYER 3C)
+if ! command -v bun >/dev/null 2>&1; then
+  echo "[$APP_NAME] ERROR: bun tidak ditemukan di PATH. Install dulu di LAYER 3C." >&2
+  sleep 10 && exit 1
+fi
+
+# ── Install deps kalau node_modules belum ada ─────────────────────────────────
+# Bun auto-load .env dari project root (tidak perlu dotenv import).
+# trustedDependencies (@napi-rs/canvas, esbuild, sharp) diizinkan otomatis oleh bun install.
+if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
+  echo "[$APP_NAME] bun install..."
+  # --frozen-lockfile kalau bun.lock ada (reproducible), fallback ke resolve baru
+  if [ -f bun.lock ]; then
+    bun install --frozen-lockfile || bun install
+  else
+    bun install
+  fi
+  echo "[$APP_NAME] deps siap."
+fi
+
+# ── Default port 47291 (override via APIS_PORT atau PORT) ─────────────────────
+# APP_PORT dipakai run-apis sendiri; PORT dipakai internal app (Bun auto-load .env).
+export PORT="${APIS_PORT:-${PORT:-47291}}"
+echo "[$APP_NAME] start: bun run index.js  (PORT=$PORT)"
+
+# Bun run langsung exec entry dari package.json "start" → "bun run index.js"
+exec /usr/local/bin/clear-app-port-env.sh bun run index.js
+SCRIPT
+
 # ─── run-ollama.sh ────────────────────────────────────────────────────────────
 # v4 — Ollama LLM service (dijalankan sebagai "animest" di PM2)
 # pm2 start "ollama serve" --name animest
@@ -1528,7 +1594,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js v4 — Ubuntu + Ollama)"
+  echo "Mode: adaptive launcher (index.js v5 — Ubuntu + Ollama + apis/Bun)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1538,7 +1604,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "kfai-nodejs" "kfai-mcp" "ttt" "catur" "ollama" "cloudflared" "adaptive-launcher"; do
+for pat in "kfai-nodejs" "kfai-mcp" "ttt" "catur" "ollama" "cloudflared" "apis" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1559,7 +1625,7 @@ else
 fi
 
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*catur" ollama sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*kfai" "node.*ttt" "node.*catur" "apis" "bun.*index.js" ollama sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1658,8 +1724,9 @@ echo "  LAUNCHER_MODE=${LAUNCHER_MODE:-adaptive}  |  kstatus"
 echo "  Edit launcher: nano /data/launcher/index.js"
 echo "  Ollama API: http://${OLLAMA_HOST:-0.0.0.0:11434}"
 echo "  Models: ${OLLAMA_MODELS:-/data/ollama/models}"
+echo "  APIs (Bun): http://0.0.0.0:${APIS_PORT:-47291}  (/docs = Swagger)"
 echo
-node -v; yarn -v; npm -v; cloudflared --version 2>/dev/null; ollama --version 2>/dev/null; echo
+node -v; yarn -v; npm -v; bun -v 2>/dev/null; cloudflared --version 2>/dev/null; ollama --version 2>/dev/null; echo
 BASHRC
 
 # ── 7. Tunggu optimasi selesai ─────────────────────────────────────────────
@@ -1679,7 +1746,7 @@ if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2|^ollama)' \
-    --prefer '(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared)' \
+    --prefer '(^node.*kfai|^node.*ttt|^node.*catur|^cloudflared|apis|bun.*index.js)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1704,7 +1771,7 @@ LAUNCHER_MODE="${LAUNCHER_MODE:-adaptive}"
 echo "[start-all] LAUNCHER_MODE=${LAUNCHER_MODE}"
 
 if [ "$LAUNCHER_MODE" = "pm2" ]; then
-  # ── PM2 mode (v4: tambah ollama/animest) ────────────────────────────────────
+  # ── PM2 mode (v5: tambah apis/Bun) ───────────────────────────────────────────
   echo "[start-all] mode PM2"
   cat > /data/ecosystem.config.js <<'PM2EOF'
 const fs = require('fs');
@@ -1728,11 +1795,12 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v4-ram (6 app — nexcloud dihapus): kfai 32%, mcp 22%, ollama 20%, ttt 10%, catur 10%, cf 6%
+// Distribusi v5 (7 app — tambah apis Bun): kfai 27%, mcp 22%, ollama 20%, apis 5%, ttt 10%, catur 10%, cf 6%
 const mem = {
-  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(1024, Math.floor(BUDGET*0.32))+'M',
+  kfai:     process.env.KFAI_MAX_MEMORY     || Math.min(896,  Math.floor(BUDGET*0.27))+'M',
   mcp:      process.env.KFAI_MCP_MAX_MEMORY || Math.min(1280, Math.floor(BUDGET*0.22))+'M',
   ollama:   process.env.OLLAMA_MAX_MEMORY   || Math.min(768,  Math.floor(BUDGET*0.20))+'M',
+  apis:     process.env.APIS_MAX_MEMORY     || Math.min(256,  Math.floor(BUDGET*0.05))+'M',
   ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.10))+'M',
   catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.10))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
@@ -1765,12 +1833,17 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
     listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+  { name:'apis', script:'/usr/local/bin/run-apis.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.apis, kill_timeout:10000,
+    listen_timeout:15000,
+    env:{ NODE_ENV:'production', PORT: process.env.APIS_PORT || '47291' } },
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
 
 else
-  # ── Adaptive launcher mode (default, v4 — Ubuntu + Ollama) ────────────────
+  # ── Adaptive launcher mode (default, v5 — Ubuntu + Ollama + apis/Bun) ────
   echo "[start-all] mode adaptive launcher"
   # Pastikan launcher ada di /data (persistent – bisa di-edit via SSH)
   [ ! -f /data/launcher/index.js ] && cp /usr/local/bin/adaptive-launcher.js /data/launcher/index.js
@@ -1792,6 +1865,7 @@ RUN chmod +x \
       /usr/local/bin/run-ttt.sh \
       /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-animest.sh \
+      /usr/local/bin/run-apis.sh \
       /usr/local/bin/run-ollama.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
