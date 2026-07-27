@@ -1715,6 +1715,11 @@ const mem = {
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
+// Catatan: apps di bawah pakai interpreter:'bash' (run-*.sh), jadi TIDAK boleh
+// pakai node_args — kalau dipakai, PM2 akan meneruskan args tsb ke bash sebagai
+// flag (-> error "bash: --expose-gc: invalid option"). Flag node di-derive dari
+// env var NODE_OPTIONS (set di Dockerfile ENV block) yang otomatis diwariskan
+// ke proses node yang di-spawn oleh run-*.sh.
 module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
@@ -1727,15 +1732,15 @@ module.exports = { apps: [
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
-    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    listen_timeout:15000, env:{NODE_ENV:'production'} },
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
-    listen_timeout:15000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    listen_timeout:15000, env:{NODE_ENV:'production'} },
   { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.animest, kill_timeout:15000,
-    listen_timeout:20000, node_args:nodeArgs, env:{NODE_ENV:'production'} },
+    listen_timeout:20000, env:{NODE_ENV:'production'} },
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
