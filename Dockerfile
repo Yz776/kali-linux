@@ -1346,9 +1346,16 @@ exec /usr/local/bin/run-node-app.sh \
 SCRIPT
 
 # ─── run-animest.sh ───────────────────────────────────────────────────────────
-# v3.2 — launcher script untuk aplikasi animest (https://github.com/Yz776/animest.git)
-# Pakai node_modules dari ZIP (--legacy-peer-deps sebagai fallback install)
-# Jalankan dengan: yarn start
+# v6.2 — launcher script untuk aplikasi animest (https://github.com/Yz776/animest.git)
+# Fast-start mode: TIDAK ada yarn install / yarn build saat startup.
+#   • node_modules harus sudah tersedia (via node_modules.zip atau pre-installed)
+#   • Frontend build artifacts (.next / dist / build) harus sudah tersedia
+#   • Jika deps/build hilang, app akan fail-fast (exit 127) — build harus dilakukan
+#     saat image build / manual via SSH, BUKAN saat PM2 startup (terlalu lambat &
+#     boros RAM untuk container kecil).
+# Override:
+#   ANIMEST_AUTO_INSTALL=true   -> balik ke behavior lama (yarn install kalau kosong)
+#   ANIMEST_AUTO_BUILD=true     -> balik ke behavior lama (yarn build kalau .next hilang)
 # Default memory 256MB (override via ANIMEST_NODE_OPTIONS / ANIMEST_MEMORY_MB di launcher)
 RUN cat > /usr/local/bin/run-animest.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1357,12 +1364,17 @@ APP_NAME="animest"
 APP_DIR="${ANIMEST_DIR:-/data/apps/animest}"
 ZIP_FILE="${ANIMEST_NODE_MODULES_ZIP:-node_modules.zip}"
 USE_ZIP="${ANIMEST_USE_NODE_MODULES_ZIP:-true}"
+AUTO_INSTALL="${ANIMEST_AUTO_INSTALL:-false}"
+AUTO_BUILD="${ANIMEST_AUTO_BUILD:-false}"
 
 [ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
 cd "$APP_DIR"
 [ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
 
-# ── Coba ekstrak dari zip dulu ──────────────────────────────────────────────
+# Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
+export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+
+# ── 1. Pastikan node_modules ada ─────────────────────────────────────────────
 extract_zip() {
   [ ! -f "$1" ] && return 1
   echo "[$APP_NAME] ekstrak zip: $1"
@@ -1376,33 +1388,50 @@ extract_zip() {
   rm -rf node_modules; return 1
 }
 
-NEED_INSTALL=true
-if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
-  echo "[$APP_NAME] pakai node_modules dari zip."
-  NEED_INSTALL=false
-fi
+has_node_modules() {
+  [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]
+}
 
-# ── Fallback: yarn install (animest butuh dev deps untuk build frontend) ────
-#   Yarn classic TIDAK punya --legacy-peer-deps (peer deps handling lebih lenient)
-#   Yarn classic include devDependencies by default (tidak butuh --include=dev)
-if [ "$NEED_INSTALL" = "true" ]; then
-  if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
-    echo "[$APP_NAME] yarn install..."
-    export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+if ! has_node_modules; then
+  if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
+    echo "[$APP_NAME] pakai node_modules dari zip."
+  elif [ "$AUTO_INSTALL" = "true" ]; then
+    echo "[$APP_NAME] yarn install (AUTO_INSTALL=true)..."
     yarn install \
       || { echo "[$APP_NAME] WARN: yarn install gagal, coba npm --legacy-peer-deps"; \
            npm install --legacy-peer-deps --include=dev --no-audit --no-fund --loglevel=error; }
     yarn cache clean 2>/dev/null || true
     echo "[$APP_NAME] deps siap."
+  else
+    echo "[$APP_NAME] ERROR: node_modules kosong & ANIMEST_AUTO_INSTALL=false." >&2
+    echo "[$APP_NAME]        Jalankan: cd $APP_DIR && yarn install  (via SSH), atau" >&2
+    echo "[$APP_NAME]        set ANIMEST_AUTO_INSTALL=true untuk auto-install di startup." >&2
+    sleep 10 && exit 1
   fi
 fi
 
-echo "[$APP_NAME] build frontend: yarn build"
-export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
-yarn build
+# ── 2. Pastikan frontend build artifacts ada ─────────────────────────────────
+#   Cek lokasi umum: .next (Next.js), dist (Vite/webpack), build (CRA)
+has_build_artifacts() {
+  for d in .next dist build out; do
+    [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] && return 0
+  done
+  return 1
+}
 
-echo "[$APP_NAME] start backend: yarn start"
-exec yarn start
+if ! has_build_artifacts; then
+  if [ "$AUTO_BUILD" = "true" ]; then
+    echo "[$APP_NAME] yarn build (AUTO_BUILD=true)..."
+    yarn build
+  else
+    echo "[$APP_NAME] WARN: tidak ada build artifacts (.next/dist/build/out) & ANIMEST_AUTO_BUILD=false."
+    echo "[$APP_NAME]        Mencoba yarn start langsung — mungkin 404 / error kalau perlu build."
+  fi
+fi
+
+# ── 3. Start backend ─────────────────────────────────────────────────────────
+echo "[$APP_NAME] start: yarn start"
+exec /usr/local/bin/clear-app-port-env.sh yarn start
 SCRIPT
 
 # ─── run-apis.sh ──────────────────────────────────────────────────────────────
