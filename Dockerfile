@@ -8,10 +8,14 @@ FROM ubuntu:24.04
 #          LAUNCHER_MODE default diubah ke "pm2" agar semua service mudah
 #          di-monitor via pm2 status / pm2 logs. Adaptive launcher tetap
 #          tersedia (set LAUNCHER_MODE=adaptive) sebagai fallback.
-#          App tersisa: cloudflared-ssh, ttt, catur, animest, apis (Bun).
-#          Realokasi memori: apis 25%, ttt 20%, catur 20%, animest 15%, cf 96M fixed.
+#          App auto-start: cloudflared-ssh, ttt, catur, apis (Bun).
+#          Realokasi memori: apis 30%, ttt 25%, catur 25%, cf 96M fixed.
 #          LAYER 3B (Ollama install) dihapus; EXPOSE 11434 → 47291 (apis).
 #          PM2_PUBLIC_KEY & PM2_SECRET_KEY ditambahkan (untuk PM2 Plus dashboard).
+#   • v6.3 — animest jadi 100% MANUAL (tidak di-auto-start oleh PM2/adaptive).
+#            run-animest.sh tetap tersedia — start manual via SSH:
+#              pm2 start /usr/local/bin/run-animest.sh --name animest --interpreter bash
+#            Memori 15% yang di-freed dikembalikan ke apis/ttt/catur.
 #   • v5 — tambah aplikasi "apis" (https://github.com/Yz776/apis.git)
 #          Bun + Elysia REST API (142 endpoints, port 47291 default, /docs = Swagger UI)
 #          Berjalan di PM2 (mode pm2) atau adaptive launcher (mode adaptive)
@@ -404,10 +408,12 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v6 (5 app — tanpa kfai-* & ollama): apis 25%, ttt 20%, catur 20%, animest 15%, cf 96M fixed
-const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.25)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
-const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
+// Distribusi v6.3 (4 app auto-start + animest manual — tanpa kfai-* & ollama):
+//   apis 30%, ttt 25%, catur 25%, cf 96M fixed (total ~80%, sisa 20% buffer untuk animest manual)
+// ANIMEST_MEM tetap didefinisikan untuk dipakai jika user start animest manual via adaptive launcher.
+const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.30)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.25)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.25)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(256,  Math.floor(APP_BUDGET_MB * 0.15)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
@@ -465,13 +471,9 @@ const APPS = [
     nice:     NORMAL_NICE,
     priority: 5,
   },
-  {
-    name:     'animest',
-    script:   '/usr/local/bin/run-animest.sh',
-    memoryMB: ANIMEST_MEM,
-    nice:     NORMAL_NICE,
-    priority: 4, // frontend + backend (yarn build → yarn start)
-  },
+  // animest TIDAK di-auto-start — jalankan manual via SSH:
+  //   pm2 start /usr/local/bin/run-animest.sh --name animest --interpreter bash
+  // (ANIMEST_MEM tetap didefinisikan di atas untuk referensi manual)
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1735,12 +1737,12 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v6 (5 app — tanpa kfai-* & ollama): apis 25%, ttt 20%, catur 20%, animest 15%, cf 96M fixed
+// Distribusi v6.3 (4 app auto-start — animest 100% manual):
+//   apis 30%, ttt 25%, catur 25%, cf 96M fixed
 const mem = {
-  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.25))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
-  animest:  process.env.ANIMEST_MAX_MEMORY   || Math.min(256,  Math.floor(BUDGET*0.15))+'M',
+  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.30))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.25))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.25))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -1766,10 +1768,9 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
     listen_timeout:15000, env:{NODE_ENV:'production'} },
-  { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
-    exp_backoff_restart_delay:200, max_memory_restart:mem.animest, kill_timeout:15000,
-    listen_timeout:20000, env:{NODE_ENV:'production'} },
+  // animest TIDAK di-auto-start — start manual via SSH:
+  //   pm2 start /usr/local/bin/run-animest.sh --name animest --interpreter bash
+  //   (lalu: pm2 save untuk persist)
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
