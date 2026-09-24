@@ -4,6 +4,15 @@ FROM ubuntu:24.04
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 # Catatan perubahan:
+#   • v7 — tambah aplikasi "zrouter" (https://github.com/Yz776/zrouter.git)
+#          KRouter v2.0 — Bun + ElysiaJS AI Gateway, OpenAI/Anthropic-compatible.
+#          Port default 3000 (override via ZROUTER_PORT). Dashboard di /,
+#          login di /login.html (default admin/password123 — ubah setelah login).
+#          Pakai bun:sqlite (built-in, no extra dep), DB di /data/apps/zrouter/data/krouter.db.
+#          App auto-start v7: cloudflared-ssh, apis, zrouter, ttt, catur.
+#          Realokasi memori v7: apis 25%, zrouter 15%, ttt 20%, catur 20%, cf 96M fixed
+#          (total ~80%, sisa 20% buffer untuk animest manual).
+#          EXPOSE ditambah 3000 (zrouter dashboard/API).
 #   • v6 — hapus aplikasi kfai-* (kfai-nodejs, kfai-mcp) dan ollama service
 #          LAUNCHER_MODE default diubah ke "pm2" agar semua service mudah
 #          di-monitor via pm2 status / pm2 logs. Adaptive launcher tetap
@@ -104,10 +113,14 @@ ENV TTT_REPO=https://github.com/Yz776/ttt.git \
     ANIMEST_BRANCH= \
     APIS_REPO=https://github.com/Yz776/apis.git \
     APIS_BRANCH= \
+    ZROUTER_REPO=https://github.com/Yz776/zrouter.git \
+    ZROUTER_BRANCH= \
     TTT_DIR=/data/apps/ttt \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
     APIS_DIR=/data/apps/apis \
+    ZROUTER_DIR=/data/apps/zrouter \
+    ZROUTER_PORT=3000 \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -374,6 +387,7 @@ const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 const APIS_DIR     = process.env.APIS_DIR     || '/data/apps/apis';
+const ZROUTER_DIR   = process.env.ZROUTER_DIR || '/data/apps/zrouter';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'apis').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -408,12 +422,13 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v6.3 (4 app auto-start + animest manual — tanpa kfai-* & ollama):
-//   apis 30%, ttt 25%, catur 25%, cf 96M fixed (total ~80%, sisa 20% buffer untuk animest manual)
+// Distribusi v7 (5 app auto-start + animest manual — zrouter ditambahkan):
+//   apis 25%, zrouter 15%, ttt 20%, catur 20%, cf 96M fixed (total ~80%, sisa 20% buffer)
 // ANIMEST_MEM tetap didefinisikan untuk dipakai jika user start animest manual via adaptive launcher.
-const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.30)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.25)));
-const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.25)));
+const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.25)));
+const ZROUTER_MEM  = Number(process.env.ZROUTER_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(256,  Math.floor(APP_BUDGET_MB * 0.15)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
@@ -456,6 +471,13 @@ const APPS = [
     memoryMB: APIS_MEM,
     nice:     NORMAL_NICE,
     priority: 7, // Bun + Elysia REST API (port 47291) — app utama
+  },
+  {
+    name:     'zrouter',
+    script:   '/usr/local/bin/run-zrouter.sh',
+    memoryMB: ZROUTER_MEM,
+    nice:     NORMAL_NICE,
+    priority: 6, // KRouter AI Gateway (port 3000) — OpenAI/Anthropic-compatible
   },
   {
     name:     'ttt',
@@ -950,11 +972,12 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v6 — Ubuntu 24.04 + apis (Bun) [tanpa kfai-* & ollama]`);
+console.log(`[LAUNCHER] v7 — Ubuntu 24.04 + apis + zrouter (Bun) [tanpa kfai-* & ollama]`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
 console.log(`[LAUNCHER] apis: port=${process.env.APIS_PORT || '47291'} dir=${APIS_DIR}`);
+console.log(`[LAUNCHER] zrouter: port=${process.env.ZROUTER_PORT || '3000'} dir=${ZROUTER_DIR}`);
 for (const app of APPS)
   console.log(`[LAUNCHER]   ${app.name.padEnd(16)} init=${safeNum(app.memoryMB,512)}MB  priority=${app.priority}`);
 console.log(`[LAUNCHER] ══════════════════════════════════════════\n`);
@@ -1201,6 +1224,7 @@ clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"  
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 clone_or_pull "apis"        "${APIS_REPO:-}"      "${APIS_DIR:-/data/apps/apis}"          "${APIS_BRANCH:-}" &
+clone_or_pull "zrouter"     "${ZROUTER_REPO:-}"   "${ZROUTER_DIR:-/data/apps/zrouter}"    "${ZROUTER_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1483,6 +1507,61 @@ echo "[$APP_NAME] start: bun run index.js  (PORT=$PORT)"
 exec /usr/local/bin/clear-app-port-env.sh bun run index.js
 SCRIPT
 
+# ─── run-zrouter.sh ───────────────────────────────────────────────────────────
+# v7 — launcher script untuk aplikasi zrouter (https://github.com/Yz776/zrouter.git)
+# KRouter v2.0 — Bun + ElysiaJS AI Gateway (OpenAI/Anthropic-compatible).
+# Port default 3000 (override via ZROUTER_PORT atau PORT).
+# DB: bun:sqlite (built-in) → /data/apps/zrouter/data/krouter.db
+# Dashboard: /  •  Login: /login.html  (default admin/password123 — UBAH setelah login)
+# Install: bun install (pakai bun.lock bila ada — reproducible)
+# Run:     bun run src/index.ts   (entry dari package.json "start")
+RUN cat > /usr/local/bin/run-zrouter.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="zrouter"
+APP_DIR="${ZROUTER_DIR:-/data/apps/zrouter}"
+
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+cd "$APP_DIR"
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
+
+# Bun wajib tersedia (dipasang di LAYER 3C)
+if ! command -v bun >/dev/null 2>&1; then
+  echo "[$APP_NAME] ERROR: bun tidak ditemukan di PATH. Install dulu di LAYER 3C." >&2
+  sleep 10 && exit 1
+fi
+
+# ── Install deps kalau node_modules belum ada ─────────────────────────────────
+if [ ! -d node_modules ] || [ ! "$(ls -A node_modules 2>/dev/null)" ]; then
+  echo "[$APP_NAME] bun install..."
+  if [ -f bun.lock ]; then
+    bun install --frozen-lockfile || bun install
+  else
+    bun install
+  fi
+  echo "[$APP_NAME] deps siap."
+fi
+
+# ── Siapkan data & logs dir ───────────────────────────────────────────────────
+mkdir -p "$APP_DIR/data" "$APP_DIR/logs"
+
+# ── Default port 3000 (override via ZROUTER_PORT atau PORT) ────────────────────
+export PORT="${ZROUTER_PORT:-${PORT:-3000}}"
+# SQLite DB path — persistent di /data
+export KROUTER_DB_PATH="${KROUTER_DB_PATH:-$APP_DIR/data/krouter.db}"
+# Log file path
+export LOG_FILE="${LOG_FILE:-$APP_DIR/logs/krouter.log}"
+# Cookie secure=false karena jalan di HTTP (container lokal). Set true via env
+# kalau sudah di-deploy di belakang HTTPS reverse proxy.
+export SESSION_COOKIE_SECURE="${SESSION_COOKIE_SECURE:-false}"
+export SESSION_COOKIE_SAMESITE="${SESSION_COOKIE_SAMESITE:-Lax}"
+
+# Bun auto-load .env dari project root — env yang sudah di-export di atas akan
+# diwariskan ke proses Bun. Tidak perlu dotenv import.
+echo "[$APP_NAME] start: bun run src/index.ts  (PORT=$PORT)"
+exec /usr/local/bin/clear-app-port-env.sh bun run src/index.ts
+SCRIPT
+
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1545,7 +1624,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-pm2}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (index.js v6 — Ubuntu + apis/Bun)"
+  echo "Mode: adaptive launcher (v7 — Ubuntu + apis + zrouter/Bun)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1555,7 +1634,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "ttt" "catur" "animest" "cloudflared" "apis" "bun.*index.js" "adaptive-launcher"; do
+for pat in "ttt" "catur" "animest" "cloudflared" "apis" "zrouter" "bun.*index.js" "bun.*src/index.ts" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1570,7 +1649,7 @@ echo "  Swagger: http://0.0.0.0:${APIS_PORT}/docs"
 curl -sf http://localhost:${APIS_PORT}/ 2>/dev/null | head -c 200 || echo "  API: belum responsif"
 
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*ttt" "node.*catur" "node.*animest" "apis" "bun.*index.js" sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*ttt" "node.*catur" "node.*animest" "apis" "zrouter" "bun.*index.js" "bun.*src/index.ts" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1605,6 +1684,7 @@ chmod 1777 /data/tmp /tmp || true
 pkill -f "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null && echo "[start-all] clean stale launcher" || true
 pkill -f "PM2.*God Daemon" 2>/dev/null && echo "[start-all] clean stale PM2" || true
 pkill -f "bun.*index.js" 2>/dev/null && echo "[start-all] clean stale apis (bun)" || true
+pkill -f "bun.*src/index.ts" 2>/dev/null && echo "[start-all] clean stale zrouter (bun)" || true
 sleep 1
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
@@ -1688,7 +1768,7 @@ if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2)' \
-    --prefer '(^node.*ttt|^node.*catur|^node.*animest|^cloudflared|apis|bun.*index.js)' \
+    --prefer '(^node.*ttt|^node.*catur|^node.*animest|^cloudflared|apis|zrouter|bun.*index.js|bun.*src/index.ts)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1737,12 +1817,13 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v6.3 (4 app auto-start — animest 100% manual):
-//   apis 30%, ttt 25%, catur 25%, cf 96M fixed
+// Distribusi v7 (5 app auto-start — animest 100% manual):
+//   apis 25%, zrouter 15%, ttt 20%, catur 20%, cf 96M fixed
 const mem = {
-  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.30))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.25))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.25))+'M',
+  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.25))+'M',
+  zrouter:  process.env.ZROUTER_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -1760,6 +1841,11 @@ module.exports = { apps: [
     exp_backoff_restart_delay:200, max_memory_restart:mem.apis, kill_timeout:10000,
     listen_timeout:15000,
     env:{ NODE_ENV:'production', PORT: process.env.APIS_PORT || '47291' } },
+  { name:'zrouter', script:'/usr/local/bin/run-zrouter.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.zrouter, kill_timeout:10000,
+    listen_timeout:15000,
+    env:{ NODE_ENV:'production', PORT: process.env.ZROUTER_PORT || '3000' } },
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
@@ -1797,12 +1883,13 @@ RUN chmod +x \
       /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-apis.sh \
+      /usr/local/bin/run-zrouter.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
       /usr/local/bin/start-all.sh
 
-EXPOSE 22 47291
+EXPOSE 22 3000 47291
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/start-all.sh"]
