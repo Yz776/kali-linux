@@ -4,6 +4,19 @@ FROM ubuntu:24.04
 # ENVIRONMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 # Catatan perubahan:
+#   • v8 — tambah aplikasi "am-render-studio" (https://github.com/Yz776/am-render-studio.git)
+#          AM Render Studio — Next.js 16 web-based video editor (mirip Alight Motion).
+#          Stack: Next.js 16 (standalone build) + Prisma (SQLite) + Puppeteer (chromium
+#          swiftshader WebGL) + ffmpeg (render MP4 via headless frame capture).
+#          Port default 3001 (override via AMRENDERSTUDIO_PORT — JANGAN pakai 3000
+#          karena dipakai zrouter). SQLite DB di /data/apps/am-render-studio/db/custom.db.
+#          App auto-start v8: cloudflared-ssh, apis, zrouter, am-render-studio, ttt, catur.
+#          Realokasi memori v8: apis 20%, zrouter 12%, am-render-studio 25%, ttt 15%,
+#          catur 15%, cf 96M fixed (total ~87%, sisa 13% buffer untuk chromium/ffmpeg
+#          child processes dari render pipeline + animest manual).
+#          EXPOSE ditambah 3001 (am-render-studio web UI + API).
+#          Apt: tambah ffmpeg ke LAYER 1 (untuk render MP4 h264 + audio mux).
+#          Puppeteer chromium runtime deps sudah ada di LAYER 1B (sejak v6).
 #   • v7 — tambah aplikasi "zrouter" (https://github.com/Yz776/zrouter.git)
 #          KRouter v2.0 — Bun + ElysiaJS AI Gateway, OpenAI/Anthropic-compatible.
 #          Port default 3000 (override via ZROUTER_PORT). Dashboard di /,
@@ -115,12 +128,16 @@ ENV TTT_REPO=https://github.com/Yz776/ttt.git \
     APIS_BRANCH= \
     ZROUTER_REPO=https://github.com/Yz776/zrouter.git \
     ZROUTER_BRANCH= \
+    AMRENDERSTUDIO_REPO=https://github.com/Yz776/am-render-studio.git \
+    AMRENDERSTUDIO_BRANCH= \
     TTT_DIR=/data/apps/ttt \
     CATUR_DIR=/data/apps/catur \
     ANIMEST_DIR=/data/apps/animest \
     APIS_DIR=/data/apps/apis \
     ZROUTER_DIR=/data/apps/zrouter \
+    AMRENDERSTUDIO_DIR=/data/apps/am-render-studio \
     ZROUTER_PORT=3000 \
+    AMRENDERSTUDIO_PORT=3001 \
     LAUNCHER_DIR=/data/launcher
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,7 +162,7 @@ RUN set -eux; \
       openssh-server openssl sudo tini \
       nano vim htop procps net-tools iproute2 \
       iputils-ping dnsutils bind9-dnsutils unzip zstd \
-      build-essential python3 python3-pip \
+      build-essential python3 python3-pip ffmpeg \
       earlyoom nscd \
     ; \
     # Security tools (beberapa mungkin tidak ada di Ubuntu, fallback gracefully)
@@ -388,6 +405,7 @@ const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 const APIS_DIR     = process.env.APIS_DIR     || '/data/apps/apis';
 const ZROUTER_DIR   = process.env.ZROUTER_DIR || '/data/apps/zrouter';
+const AMRENDERSTUDIO_DIR = process.env.AMRENDERSTUDIO_DIR || '/data/apps/am-render-studio';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'apis').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -422,13 +440,15 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v7 (5 app auto-start + animest manual — zrouter ditambahkan):
-//   apis 25%, zrouter 15%, ttt 20%, catur 20%, cf 96M fixed (total ~80%, sisa 20% buffer)
+// Distribusi v8 (6 app auto-start + animest manual — am-render-studio ditambahkan):
+//   apis 20%, zrouter 12%, am-render-studio 25%, ttt 15%, catur 15%, cf 96M fixed
+//   (total ~87%, sisa 13% buffer untuk chromium/ffmpeg child processes render pipeline + animest manual)
 // ANIMEST_MEM tetap didefinisikan untuk dipakai jika user start animest manual via adaptive launcher.
-const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.25)));
-const ZROUTER_MEM  = Number(process.env.ZROUTER_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
-const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
-const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.20)));
+const APIS_MEM     = Number(process.env.APIS_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.20)));
+const ZROUTER_MEM  = Number(process.env.ZROUTER_MEMORY_MB   || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.12)));
+const AMRENDERSTUDIO_MEM = Number(process.env.AMRENDERSTUDIO_MEMORY_MB || Math.min(768, Math.floor(APP_BUDGET_MB * 0.25)));
+const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
+const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(256,  Math.floor(APP_BUDGET_MB * 0.15)));
 const CF_MEM       = Number(process.env.CF_MEMORY_MB        || 96);
 
@@ -478,6 +498,13 @@ const APPS = [
     memoryMB: ZROUTER_MEM,
     nice:     NORMAL_NICE,
     priority: 6, // KRouter AI Gateway (port 3000) — OpenAI/Anthropic-compatible
+  },
+  {
+    name:     'amrenderstudio',
+    script:   '/usr/local/bin/run-amrenderstudio.sh',
+    memoryMB: AMRENDERSTUDIO_MEM,
+    nice:     NORMAL_NICE,
+    priority: 6, // AM Render Studio (port 3001) — Next.js video editor + render pipeline
   },
   {
     name:     'ttt',
@@ -972,12 +999,13 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v7 — Ubuntu 24.04 + apis + zrouter (Bun) [tanpa kfai-* & ollama]`);
+console.log(`[LAUNCHER] v8 — Ubuntu 24.04 + apis + zrouter + am-render-studio (Bun) [tanpa kfai-* & ollama]`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
 console.log(`[LAUNCHER] apis: port=${process.env.APIS_PORT || '47291'} dir=${APIS_DIR}`);
 console.log(`[LAUNCHER] zrouter: port=${process.env.ZROUTER_PORT || '3000'} dir=${ZROUTER_DIR}`);
+console.log(`[LAUNCHER] amrenderstudio: port=${process.env.AMRENDERSTUDIO_PORT || '3001'} dir=${AMRENDERSTUDIO_DIR}`);
 for (const app of APPS)
   console.log(`[LAUNCHER]   ${app.name.padEnd(16)} init=${safeNum(app.memoryMB,512)}MB  priority=${app.priority}`);
 console.log(`[LAUNCHER] ══════════════════════════════════════════\n`);
@@ -1167,6 +1195,7 @@ while true; do
   protect "node.*ttt"             -700
   protect "node.*catur"           -700
   protect "node.*animest"         -700
+  protect "next.*standalone\|bun.*standalone\|am-render-studio" -700
   protect "cloudflared"           -500
   sleep 30
 done
@@ -1225,6 +1254,7 @@ clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 clone_or_pull "apis"        "${APIS_REPO:-}"      "${APIS_DIR:-/data/apps/apis}"          "${APIS_BRANCH:-}" &
 clone_or_pull "zrouter"     "${ZROUTER_REPO:-}"   "${ZROUTER_DIR:-/data/apps/zrouter}"    "${ZROUTER_BRANCH:-}" &
+clone_or_pull "am-render-studio" "${AMRENDERSTUDIO_REPO:-}" "${AMRENDERSTUDIO_DIR:-/data/apps/am-render-studio}" "${AMRENDERSTUDIO_BRANCH:-}" &
 
 FAIL=0
 for job in $(jobs -p); do
@@ -1562,6 +1592,146 @@ echo "[$APP_NAME] start: bun run src/index.ts  (PORT=$PORT)"
 exec /usr/local/bin/clear-app-port-env.sh bun run src/index.ts
 SCRIPT
 
+# ─── run-amrenderstudio.sh ─────────────────────────────────────────────────────
+# v8 — launcher script untuk aplikasi am-render-studio (https://github.com/Yz776/am-render-studio.git)
+# AM Render Studio — Next.js 16 standalone build (video editor mirip Alight Motion).
+# Stack: Next.js 16 + Prisma (SQLite) + Puppeteer (chromium swiftshader WebGL) + ffmpeg.
+# Port default 3001 (JANGAN pakai 3000 — dipakai zrouter).
+# Install: bun install (puppeteer postinstall akan auto-download chromium ke cache).
+# Build:   bun run build  (hasilnya .next/standalone — single-file Next.js server).
+# Run:     bun .next/standalone/server.js  (entry hasil build standalone).
+#
+# Behavior startup (mirip animest — Next.js app):
+#   AUTO_INSTALL  default true  → bun install kalau node_modules kosong
+#   AUTO_BUILD    default false → perlu manual `bun run build` via SSH sekali
+#   AUTO_PUPPETEER tidak diperlukan — puppeteer postinstall auto-download chromium
+#
+# Memory default: 384MB via AMRENDERSTUDIO_MEMORY_MB (override via env).
+# Chromium & ffmpeg child processes (saat render) TIDAK di-cap PM2 — mereka pakai
+# sisa 13% budget + adaptive launcher buffer.
+RUN cat > /usr/local/bin/run-amrenderstudio.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="amrenderstudio"
+APP_DIR="${AMRENDERSTUDIO_DIR:-/data/apps/am-render-studio}"
+ZIP_FILE="${AMRENDERSTUDIO_NODE_MODULES_ZIP:-node_modules.zip}"
+USE_ZIP="${AMRENDERSTUDIO_USE_NODE_MODULES_ZIP:-true}"
+AUTO_INSTALL="${AMRENDERSTUDIO_AUTO_INSTALL:-true}"
+AUTO_BUILD="${AMRENDERSTUDIO_AUTO_BUILD:-false}"
+
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+cd "$APP_DIR"
+[ ! -f package.json ] && echo "[$APP_NAME] package.json tidak ada." >&2 && sleep 10 && exit 1
+
+# Bun wajib tersedia (dipasang di LAYER 3C)
+if ! command -v bun >/dev/null 2>&1; then
+  echo "[$APP_NAME] ERROR: bun tidak ditemukan di PATH. Install dulu di LAYER 3C." >&2
+  sleep 10 && exit 1
+fi
+
+# ffmpeg wajib untuk render pipeline (di-install di LAYER 1)
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "[$APP_NAME] WARN: ffmpeg tidak ditemukan di PATH. Render pipeline MP4 tidak akan jalan." >&2
+fi
+
+# Sanitize NODE_OPTIONS: hapus V8 flag yang tidak diizinkan di NODE_OPTIONS
+export NODE_OPTIONS="$(echo "${NODE_OPTIONS:-}" | sed 's/--gc-interval=[0-9]*//g;s/  */ /g;s/^ *//;s/ *$//')"
+
+# ── 1. Pastikan node_modules ada ─────────────────────────────────────────────
+extract_zip() {
+  [ ! -f "$1" ] && return 1
+  echo "[$APP_NAME] ekstrak zip: $1"
+  rm -rf node_modules node_modules.tmp && mkdir -p node_modules.tmp
+  unzip -q "$1" -d node_modules.tmp || { rm -rf node_modules.tmp; return 1; }
+  [ -d node_modules.tmp/node_modules ] \
+    && mv node_modules.tmp/node_modules ./node_modules \
+    || mv node_modules.tmp ./node_modules
+  rm -rf node_modules.tmp
+  find node_modules -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | grep -q . && return 0
+  rm -rf node_modules; return 1
+}
+
+has_node_modules() {
+  [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]
+}
+
+if ! has_node_modules; then
+  if [ "$USE_ZIP" = "true" ] && extract_zip "$ZIP_FILE"; then
+    echo "[$APP_NAME] pakai node_modules dari zip."
+  elif [ "$AUTO_INSTALL" = "true" ]; then
+    echo "[$APP_NAME] bun install (AUTO_INSTALL=true)..."
+    if [ -f bun.lock ]; then
+      bun install --frozen-lockfile || bun install
+    else
+      bun install
+    fi
+    echo "[$APP_NAME] deps siap. (puppeteer postinstall sudah download chromium otomatis)"
+  else
+    echo "[$APP_NAME] ERROR: node_modules kosong & AUTO_INSTALL=false." >&2
+    echo "[$APP_NAME]        Jalankan: cd $APP_DIR && bun install  (via SSH)" >&2
+    sleep 10 && exit 1
+  fi
+fi
+
+# ── 2. Prisma generate (cheap, cepat) ─────────────────────────────────────────
+# Generate Prisma Client kalau schema.prisma ada tapi node_modules/@prisma/client belum ter-generate
+if [ -f prisma/schema.prisma ] && [ ! -d node_modules/.prisma/client ]; then
+  echo "[$APP_NAME] prisma generate..."
+  bun run db:generate 2>/dev/null || bun x prisma generate 2>/dev/null || \
+    echo "[$APP_NAME] WARN: prisma generate gagal — app mungkin crash saat DB access."
+fi
+
+# ── 3. Pastikan Next.js standalone build artifacts ada ────────────────────────
+has_build_artifacts() {
+  [ -d .next/standalone ] && [ -n "$(ls -A .next/standalone 2>/dev/null)" ] && \
+  [ -f .next/standalone/server.js ]
+}
+
+if ! has_build_artifacts; then
+  if [ "$AUTO_BUILD" = "true" ]; then
+    echo "[$APP_NAME] next build (AUTO_BUILD=true) — mungkin perlu 5-10 menit..."
+    bun run build
+    # Build render-worker bundle (dipakai puppeteer worker HTML page)
+    if [ -f scripts/build-render-worker.mjs ]; then
+      echo "[$APP_NAME] build render-worker bundle..."
+      node scripts/build-render-worker.mjs 2>&1 | tail -3 || \
+        echo "[$APP_NAME] WARN: render-worker build gagal — render pipeline mungkin error."
+    fi
+  else
+    echo "[$APP_NAME] ERROR: .next/standalone tidak ada & AUTO_BUILD=false." >&2
+    echo "[$APP_NAME]        Jalankan via SSH sekali:" >&2
+    echo "[$APP_NAME]          cd $APP_DIR && bun install && bun run db:push && bun run build && node scripts/build-render-worker.mjs" >&2
+    echo "[$APP_NAME]        Set AMRENDERSTUDIO_AUTO_BUILD=true untuk auto-build (lambat ~5-10 min, boros RAM)." >&2
+    sleep 10 && exit 1
+  fi
+fi
+
+# ── 4. Build render-worker bundle kalau hilang (cheap, ~3s) ──────────────────
+if [ -f scripts/build-render-worker.mjs ] && \
+   { [ ! -f public/render-worker/renderer-bundle.js ] || [ ! -f public/render-worker/parser-bundle.js ]; }; then
+  echo "[$APP_NAME] build render-worker bundle (karena hilang)..."
+  node scripts/build-render-worker.mjs 2>&1 | tail -3 || \
+    echo "[$APP_NAME] WARN: render-worker build gagal."
+fi
+
+# ── 5. Siapkan data dir, db, download, logs (persistent di /data) ────────────
+mkdir -p "$APP_DIR/data" "$APP_DIR/db" "$APP_DIR/download" "$APP_DIR/logs" \
+         "$APP_DIR/public/render-worker" "$APP_DIR/public/upload" "$APP_DIR/.cache"
+
+# SQLite DB path — persistent di /data (di-override dari db/custom.db bila sudah ada)
+export DATABASE_URL="${DATABASE_URL:-file:$APP_DIR/db/custom.db}"
+
+# ── 6. Default port 3001 (override via AMRENDERSTUDIO_PORT atau PORT) ─────────
+# JANGAN pakai 3000 — dipakai zrouter.
+export PORT="${AMRENDERSTUDIO_PORT:-${PORT:-3001}}"
+export HOSTNAME="${HOSTNAME:-0.0.0.0}"
+# KEEP_APP_PORT_ENV=true agar clear-app-port-env.sh TIDAK hapus PORT (Next.js standalone baca PORT env).
+export KEEP_APP_PORT_ENV=true
+
+echo "[$APP_NAME] start: bun .next/standalone/server.js  (PORT=$PORT  DB=$DATABASE_URL)"
+exec /usr/local/bin/clear-app-port-env.sh bun .next/standalone/server.js
+SCRIPT
+
 # ─── run-cloudflared.sh ───────────────────────────────────────────────────────
 RUN cat > /usr/local/bin/run-cloudflared.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1624,7 +1794,7 @@ printf "\n${C}== Network ==${R}\n"; ip -br addr 2>/dev/null; ss -lntup 2>/dev/nu
 printf "\n${C}== Launcher proses ==${R}\n"
 LAUNCHER_MODE="${LAUNCHER_MODE:-pm2}"
 if [ "$LAUNCHER_MODE" = "adaptive" ]; then
-  echo "Mode: adaptive launcher (v7 — Ubuntu + apis + zrouter/Bun)"
+  echo "Mode: adaptive launcher (v8 — Ubuntu + apis + zrouter + am-render-studio/Bun)"
   pgrep -fa "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null | head -n 5 || echo "  (tidak aktif)"
 else
   echo "Mode: PM2"
@@ -1634,7 +1804,7 @@ fi
 printf "\n${C}== Top proses (RAM) ==${R}\n"; ps -eo pid,stat,pcpu,pmem,nice,rss,comm --sort=-rss | head -n 18
 
 printf "\n${C}== Per-app RSS live ==${R}\n"
-for pat in "ttt" "catur" "animest" "cloudflared" "apis" "zrouter" "bun.*index.js" "bun.*src/index.ts" "adaptive-launcher"; do
+for pat in "ttt" "catur" "animest" "cloudflared" "apis" "zrouter" "amrenderstudio" "bun.*index.js" "bun.*src/index.ts" "bun.*standalone" "adaptive-launcher"; do
   for pid in $(pgrep -f "$pat" 2>/dev/null | head -1); do
     rss=$(awk '/VmRSS:/{printf "%d", $2/1024}' /proc/$pid/status 2>/dev/null || echo "?")
     nice_val=$(ps -p $pid -o ni= 2>/dev/null | tr -d ' ')
@@ -1648,8 +1818,14 @@ echo "  URL: http://0.0.0.0:${APIS_PORT}"
 echo "  Swagger: http://0.0.0.0:${APIS_PORT}/docs"
 curl -sf http://localhost:${APIS_PORT}/ 2>/dev/null | head -c 200 || echo "  API: belum responsif"
 
+printf "\n${C}== AM Render Studio ==${R}\n"
+AMRENDERSTUDIO_PORT="${AMRENDERSTUDIO_PORT:-3001}"
+echo "  URL: http://0.0.0.0:${AMRENDERSTUDIO_PORT}"
+echo "  Render pipeline: Puppeteer (chromium swiftshader) + ffmpeg"
+curl -sf http://localhost:${AMRENDERSTUDIO_PORT}/ 2>/dev/null | head -c 200 || echo "  AM Render Studio: belum responsif"
+
 printf "\n${C}== OOM protection ==${R}\n"
-for pat in "adaptive-launcher" earlyoom "node.*server" "node.*ttt" "node.*catur" "node.*animest" "apis" "zrouter" "bun.*index.js" "bun.*src/index.ts" sshd cloudflared; do
+for pat in "adaptive-launcher" earlyoom "node.*server" "node.*ttt" "node.*catur" "node.*animest" "apis" "zrouter" "amrenderstudio" "bun.*index.js" "bun.*src/index.ts" "bun.*standalone" sshd cloudflared; do
   for pid in $(pgrep -f "$pat" 2>/dev/null); do
     score=$(cat /proc/$pid/oom_score_adj 2>/dev/null || echo "?")
     comm=$(ps -p $pid -o comm= 2>/dev/null || echo "?")
@@ -1685,6 +1861,7 @@ pkill -f "node.*adaptive-launcher\|node.*launcher/index.js" 2>/dev/null && echo 
 pkill -f "PM2.*God Daemon" 2>/dev/null && echo "[start-all] clean stale PM2" || true
 pkill -f "bun.*index.js" 2>/dev/null && echo "[start-all] clean stale apis (bun)" || true
 pkill -f "bun.*src/index.ts" 2>/dev/null && echo "[start-all] clean stale zrouter (bun)" || true
+pkill -f "bun.*standalone/server.js" 2>/dev/null && echo "[start-all] clean stale am-render-studio (bun)" || true
 sleep 1
 
 # ── 1. Optimasi sistem (paralel) ───────────────────────────────────────────
@@ -1768,7 +1945,7 @@ if command -v earlyoom >/dev/null 2>&1; then
   echo "[start-all] mulai earlyoom..."
   earlyoom -r 3600 -m 10 -s \
     --avoid '(^node.*adaptive|^node.*launcher/index|^/usr/sbin/sshd|^earlyoom|^node.*PM2)' \
-    --prefer '(^node.*ttt|^node.*catur|^node.*animest|^cloudflared|apis|zrouter|bun.*index.js|bun.*src/index.ts)' \
+    --prefer '(^node.*ttt|^node.*catur|^node.*animest|^cloudflared|apis|zrouter|amrenderstudio|bun.*index.js|bun.*src/index.ts|bun.*standalone|chromium|ffmpeg)' \
     >/var/log/earlyoom.log 2>&1 &
 else
   echo "[start-all] earlyoom tidak tersedia, andalkan oom-watchdog."
@@ -1817,13 +1994,14 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v7 (5 app auto-start — animest 100% manual):
-//   apis 25%, zrouter 15%, ttt 20%, catur 20%, cf 96M fixed
+// Distribusi v8 (6 app auto-start — am-render-studio ditambahkan):
+//   apis 20%, zrouter 12%, amrenderstudio 25%, ttt 15%, catur 15%, cf 96M fixed
 const mem = {
-  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.25))+'M',
-  zrouter:  process.env.ZROUTER_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.20))+'M',
+  apis:     process.env.APIS_MAX_MEMORY     || Math.min(512,  Math.floor(BUDGET*0.20))+'M',
+  zrouter:  process.env.ZROUTER_MAX_MEMORY  || Math.min(384,  Math.floor(BUDGET*0.12))+'M',
+  amrenderstudio: process.env.AMRENDERSTUDIO_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.25))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
@@ -1846,6 +2024,15 @@ module.exports = { apps: [
     exp_backoff_restart_delay:200, max_memory_restart:mem.zrouter, kill_timeout:10000,
     listen_timeout:15000,
     env:{ NODE_ENV:'production', PORT: process.env.ZROUTER_PORT || '3000' } },
+  { name:'amrenderstudio', script:'/usr/local/bin/run-amrenderstudio.sh', interpreter:'bash',
+    autorestart:true, max_restarts:5, min_uptime:'30s', restart_delay:5000,
+    exp_backoff_restart_delay:500, max_memory_restart:mem.amrenderstudio, kill_timeout:30000,
+    listen_timeout:60000,
+    // AM Render Studio: Next.js 16 standalone. min_uptime 30s karena startup lambat
+    // (bun install + prisma generate + render-worker build di boot pertama).
+    // kill_timeout 30s untuk kasih waktu chromium child processes clean up.
+    // KEEP_APP_PORT_ENV=true supaya PORT tidak di-unset oleh clear-app-port-env.sh.
+    env:{ NODE_ENV:'production', PORT: process.env.AMRENDERSTUDIO_PORT || '3001', KEEP_APP_PORT_ENV:'true' } },
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
@@ -1884,12 +2071,13 @@ RUN chmod +x \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-apis.sh \
       /usr/local/bin/run-zrouter.sh \
+      /usr/local/bin/run-amrenderstudio.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
       /usr/local/bin/start-all.sh
 
-EXPOSE 22 3000 47291
+EXPOSE 22 3000 3001 47291
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/start-all.sh"]
