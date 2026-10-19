@@ -1891,19 +1891,23 @@ module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
     exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },
+  { name:'nginx', script:'/usr/local/bin/run-nginx.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:'256M', kill_timeout:10000,
+    listen_timeout:15000, env:{NODE_ENV:'production'} },
+  { name:'mysql', script:'/usr/local/bin/run-mysql.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:3000,
+    exp_backoff_restart_delay:300, max_memory_restart:'512M', kill_timeout:15000,
+    listen_timeout:30000, env:{NODE_ENV:'production'} },
   { name:'cloud-storage', script:'/usr/local/bin/run-cloud-storage.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.cloud_storage, kill_timeout:15000,
     listen_timeout:30000,
-    // Node + Express REST API (port 47291) — primary app, replaces apis
-    // KEEP_APP_PORT_ENV=true supaya PORT tidak di-unset oleh clear-app-port-env.sh.
     env:{ NODE_ENV:'production', PORT: process.env.CLOUD_STORAGE_PORT || '47291', KEEP_APP_PORT_ENV:'true' } },
   { name:'aiodl', script:'/usr/local/bin/run-aiodl.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.aiodl, kill_timeout:10000,
-    listen_timeout:15000,
-    // Video downloader (TikTok/YouTube/Facebook) — port 8090, dl.kangwifi.eu.org
-    env:{ NODE_ENV:'production' } },
+    listen_timeout:15000, env:{ NODE_ENV:'production' } },
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
@@ -1912,13 +1916,6 @@ module.exports = { apps: [
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
     listen_timeout:15000, env:{NODE_ENV:'production'} },
-  // animest TIDAK di-auto-start — start manual via SSH:
-  //   pm2 start /usr/local/bin/run-animest.sh --name animest --interpreter bash
-  //   (lalu: pm2 save untuk persist)
-  //
-  // v9: apis, zrouter, amrenderstudio SUDAH DIHAPUS dari platform.
-  //     Folder /data/apps/{apis,zrouter,am-render-studio} akan di-cleanup
-  //     oleh bootstrap-apps.sh saat container boot.
 ]};
 PM2EOF
   exec pm2-runtime /data/ecosystem.config.js
