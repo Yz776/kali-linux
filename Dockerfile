@@ -151,6 +151,13 @@ ENV TTT_REPO=https://github.com/Yz776/ttt.git \
     ANIMEST_DIR=/data/apps/animest \
     CLOUD_STORAGE_DIR=/data/apps/cloud-storage \
     CLOUD_STORAGE_PORT=47291 \
+    # aiodl — video downloader (TikTok/YouTube/Facebook), pure Node.js no deps
+    AIODL_REPO=https://github.com/Yz776/aiodl.git \
+    AIODL_BRANCH=main \
+    AIODL_DIR=/data/apps/aiodl \
+    AIODL_PORT=8090 \
+    AIODL_OUT=/data/apps/aiodl/dl \
+    AIODL_GAP=4 \
     # Legacy dirs (auto-cleaned by bootstrap if present):
     APIS_DIR=/data/apps/apis \
     ZROUTER_DIR=/data/apps/zrouter \
@@ -423,6 +430,7 @@ const TTT_DIR      = process.env.TTT_DIR      || '/data/apps/ttt';
 const CATUR_DIR    = process.env.CATUR_DIR    || '/data/apps/catur';
 const ANIMEST_DIR  = process.env.ANIMEST_DIR  || '/data/apps/animest';
 const CLOUD_STORAGE_DIR = process.env.CLOUD_STORAGE_DIR || '/data/apps/cloud-storage';
+const AIODL_DIR = process.env.AIODL_DIR || '/data/apps/aiodl';
 
 const INTERACTIVE_APP   = (process.env.INTERACTIVE_APP || 'cloud-storage').trim();
 const RESOURCE_MODE     = (process.env.RESOURCE_MODE   || 'adaptive').trim().toLowerCase();
@@ -457,11 +465,12 @@ const TOTAL_MEM_MB  = detectContainerMemMB();
 const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDGET_PERCENT || 75)));
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
-// Distribusi v9 (5 app auto-start — cloud-storage, animest, catur, ttt, cf):
-//   cloud-storage 30%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
-//   (total ~90%, sisa 10% buffer untuk chromium/ffmpeg child processes + system overhead)
+// Distribusi v9 (6 app auto-start — cloud-storage, aiodl, animest, catur, ttt, cf):
+//   cloud-storage 30%, aiodl 10%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
+//   (total ~100%, sisa ~0% buffer — aiodl biasanya idle kecuali saat download aktif)
 // ANIMEST_MEM tetap didefinisikan untuk dipakai jika user start animest manual via adaptive launcher.
 const CLOUD_STORAGE_MEM = Number(process.env.CLOUD_STORAGE_MEMORY_MB || Math.min(768, Math.floor(APP_BUDGET_MB * 0.30)));
+const AIODL_MEM     = Number(process.env.AIODL_MEMORY_MB      || Math.min(256, Math.floor(APP_BUDGET_MB * 0.10)));
 const TTT_MEM      = Number(process.env.TTT_MEMORY_MB       || Math.min(384,  Math.floor(APP_BUDGET_MB * 0.15)));
 const CATUR_MEM    = Number(process.env.CATUR_MEMORY_MB     || Math.min(512,  Math.floor(APP_BUDGET_MB * 0.20)));
 const ANIMEST_MEM  = Number(process.env.ANIMEST_MEMORY_MB   || Math.min(640, Math.floor(APP_BUDGET_MB * 0.25)));
@@ -506,6 +515,13 @@ const APPS = [
     memoryMB: CLOUD_STORAGE_MEM,
     nice:     NORMAL_NICE,
     priority: 7, // Node + Express REST API (port 47291) — primary app, replaces apis
+  },
+  {
+    name:     'aiodl',
+    script:   '/usr/local/bin/run-aiodl.sh',
+    memoryMB: AIODL_MEM,
+    nice:     NORMAL_NICE,
+    priority: 6, // Video downloader (TikTok/YouTube/Facebook) — port 8090, dl.kangwifi.eu.org
   },
   {
     name:     'catur',
@@ -1000,11 +1016,12 @@ console.log(`\n[LAUNCHER] ══════════════════
 console.log(`[LAUNCHER] CPU=${CPU_COUNT} core | RAM(container)=${TOTAL_MEM_MB}MB | budget=${APP_BUDGET_MB}MB (${BUDGET_PERCENT}%)`);
 console.log(`[LAUNCHER] RESOURCE_MODE=${RESOURCE_MODE} | INTERACTIVE=${INTERACTIVE_APP}`);
 console.log(`[LAUNCHER] nice: focus=${FOCUS_NICE} normal=${NORMAL_NICE} other=${STARVE_SAFE_NICE}`);
-console.log(`[LAUNCHER] v9 — Ubuntu 24.04 + cloud-storage + catur + ttt (Node) [tanpa apis/zrouter/am-render/ollama]`);
+console.log(`[LAUNCHER] v9.1 — Ubuntu 24.04 + cloud-storage + aiodl + catur + ttt (Node) [tanpa apis/zrouter/am-render/ollama]`);
 console.log(`[LAUNCHER] mem-monitor: soft=${MEM_GUARD_SOFT_RATIO}x (no kill — limit adjusts dynamically)`);
 console.log(`[LAUNCHER] pressure: L1=nudge@128MB L2=pause@64MB L3=kill@32MB`);
 console.log(`[LAUNCHER] crash-loop: max=${CRASH_LOOP_MAX}/${CRASH_LOOP_WINDOW_MS/1000}s backoff=${CRASH_LOOP_BACKOFF_MS/1000}s`);
 console.log(`[LAUNCHER] cloud-storage: port=${process.env.CLOUD_STORAGE_PORT || '47291'} dir=${CLOUD_STORAGE_DIR}`);
+console.log(`[LAUNCHER] aiodl: port=${process.env.AIODL_PORT || '8090'} dir=${AIODL_DIR}`);
 for (const app of APPS)
   console.log(`[LAUNCHER]   ${app.name.padEnd(16)} init=${safeNum(app.memoryMB,512)}MB  priority=${app.priority}`);
 console.log(`[LAUNCHER] ══════════════════════════════════════════\n`);
@@ -1252,6 +1269,7 @@ clone_or_pull "ttt"         "${TTT_REPO:-}"       "${TTT_DIR:-/data/apps/ttt}"  
 clone_or_pull "catur"       "${CATUR_REPO:-}"     "${CATUR_DIR:-/data/apps/catur}"        "${CATUR_BRANCH:-}" &
 clone_or_pull "animest"    "${ANIMEST_REPO:-}"   "${ANIMEST_DIR:-/data/apps/animest}"    "${ANIMEST_BRANCH:-}" &
 clone_or_pull "cloud-storage" "${CLOUD_STORAGE_REPO:-}" "${CLOUD_STORAGE_DIR:-/data/apps/cloud-storage}" "${CLOUD_STORAGE_BRANCH:-}" &
+clone_or_pull "aiodl"      "${AIODL_REPO:-}"      "${AIODL_DIR:-/data/apps/aiodl}"          "${AIODL_BRANCH:-}" &
 
 # v9 cleanup: remove legacy app dirs (apis/zrouter/am-render-studio) if they exist
 for legacy_dir in /data/apps/apis /data/apps/zrouter /data/apps/am-render-studio; do
@@ -1541,6 +1559,37 @@ export KEEP_APP_PORT_ENV=true
 exec /usr/local/bin/clear-app-port-env.sh node --max-old-space-size=512 server.js
 SCRIPT
 
+# ─── run-aiodl.sh ─────────────────────────────────────────────────────────────
+# v9.1 — launcher script untuk aplikasi aiodl (https://github.com/Yz776/aiodl.git)
+# Video downloader untuk TikTok, YouTube, Facebook. Pure Node.js, no dependencies.
+# Web UI di port 8090 (override via AIODL_PORT). File output ke /data/apps/aiodl/dl.
+# Run: node src/web.js --port 8090 --host 0.0.0.0 --out /data/apps/aiodl/dl --gap 4 --verbose
+RUN cat > /usr/local/bin/run-aiodl.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_NAME="aiodl"
+APP_DIR="${AIODL_DIR:-/data/apps/aiodl}/js"
+OUT_DIR="${AIODL_OUT:-/data/apps/aiodl/dl}"
+PORT="${AIODL_PORT:-8090}"
+HOST="${AIODL_HOST:-0.0.0.0}"
+GAP="${AIODL_GAP:-4}"
+
+[ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
+cd "$APP_DIR"
+[ ! -f src/web.js ] && echo "[$APP_NAME] src/web.js tidak ada." >&2 && sleep 10 && exit 1
+
+# Pure Node.js, no install needed
+mkdir -p "$OUT_DIR"
+
+echo "[$APP_NAME] start: node src/web.js  (PORT=$PORT, OUT=$OUT_DIR)"
+exec /usr/local/bin/clear-app-port-env.sh node src/web.js \
+  --port "$PORT" \
+  --host "$HOST" \
+  --out "$OUT_DIR" \
+  --gap "$GAP" \
+  --verbose
+SCRIPT
+
 # ─── run-zrouter.sh (v9 — DEPRECATED, no-op stub) ───────────────────────────────
 # v9: zrouter telah dihapus dari platform. Script ini dipertahankan sebagai no-op stub
 # agar PM2 dump lama (kalau ada) tidak crash saat referensi script ini masih ada.
@@ -1823,10 +1872,11 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v9 (5 app auto-start — cloud-storage, animest, catur, ttt, cf):
-//   cloud-storage 30%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
+// Distribusi v9.1 (6 app auto-start — cloud-storage, aiodl, animest, catur, ttt, cf):
+//   cloud-storage 30%, aiodl 10%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
 const mem = {
   cloud_storage: process.env.CLOUD_STORAGE_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.30))+'M',
+  aiodl:    process.env.AIODL_MAX_MEMORY      || Math.min(256, Math.floor(BUDGET*0.10))+'M',
   catur:    process.env.CATUR_MAX_MEMORY     || Math.min(512, Math.floor(BUDGET*0.20))+'M',
   ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
   cf:       process.env.CF_MAX_MEMORY         || '96M',
@@ -1848,6 +1898,12 @@ module.exports = { apps: [
     // Node + Express REST API (port 47291) — primary app, replaces apis
     // KEEP_APP_PORT_ENV=true supaya PORT tidak di-unset oleh clear-app-port-env.sh.
     env:{ NODE_ENV:'production', PORT: process.env.CLOUD_STORAGE_PORT || '47291', KEEP_APP_PORT_ENV:'true' } },
+  { name:'aiodl', script:'/usr/local/bin/run-aiodl.sh', interpreter:'bash',
+    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
+    exp_backoff_restart_delay:200, max_memory_restart:mem.aiodl, kill_timeout:10000,
+    listen_timeout:15000,
+    // Video downloader (TikTok/YouTube/Facebook) — port 8090, dl.kangwifi.eu.org
+    env:{ NODE_ENV:'production' } },
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
@@ -1889,12 +1945,13 @@ RUN chmod +x \
       /usr/local/bin/run-catur.sh \
       /usr/local/bin/run-animest.sh \
       /usr/local/bin/run-cloud-storage.sh \
+      /usr/local/bin/run-aiodl.sh \
       /usr/local/bin/run-cloudflared.sh \
       /usr/local/bin/optimize-system.sh \
       /usr/local/bin/kstatus \
       /usr/local/bin/start-all.sh
 
-EXPOSE 22 80 443 3000 47291
+EXPOSE 22 80 443 3000 47291 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/start-all.sh"]
