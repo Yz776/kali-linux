@@ -1891,7 +1891,8 @@ const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16
 module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
-    exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },  { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
+    exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },
+  { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
     autorestart:true, max_restarts:5, min_uptime:'30s', restart_delay:5000,
     exp_backoff_restart_delay:500, max_memory_restart:mem.animest, kill_timeout:30000,
     listen_timeout:60000,
@@ -1901,15 +1902,11 @@ module.exports = { apps: [
     // kill_timeout 30s untuk kasih waktu chromium child processes clean up.
     env:{ NODE_ENV:'production', PORT: process.env.ANIMEST_PORT || '3051', KEEP_APP_PORT_ENV:'true' } },
 
-  
-  { name:'nginx', script:'/usr/local/bin/run-nginx.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
-    exp_backoff_restart_delay:200, max_memory_restart:'256M', kill_timeout:10000,
-    listen_timeout:15000, env:{NODE_ENV:'production'} },
-  { name:'mysql', script:'/usr/local/bin/run-mysql.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:3000,
-    exp_backoff_restart_delay:300, max_memory_restart:'512M', kill_timeout:15000,
-    listen_timeout:30000, env:{NODE_ENV:'production'} },
+  // nginx + mysql entries removed — run-nginx.sh / run-mysql.sh scripts not yet
+  // created in this image. Re-add when scripts exist:
+  //   { name:'nginx', script:'/usr/local/bin/run-nginx.sh', interpreter:'bash', ... }
+  //   { name:'mysql', script:'/usr/local/bin/run-mysql.sh', interpreter:'bash', ... }
+
   { name:'cloud-storage', script:'/usr/local/bin/run-cloud-storage.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.cloud_storage, kill_timeout:15000,
@@ -1922,18 +1919,15 @@ module.exports = { apps: [
   { name:'catur', script:'/usr/local/bin/run-catur.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.catur, kill_timeout:10000,
-    listen_timeout:15000, env:{NODE_ENV:'production'} },  { name:'rara-web', script:'/usr/local/bin/run-rara-web.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:3000,
-    exp_backoff_restart_delay:300, max_memory_restart:'1G', kill_timeout:5000,
-    listen_timeout:15000,
-    env:{ NODE_ENV:'production', PORT: process.env.RARA_PORT || '3002', HOSTNAME:'0.0.0.0' } },
-  { name:'rara-zrouter', script:'/usr/local/bin/run-rara-zrouter.sh', interpreter:'bash',
-    autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:3000,
-    exp_backoff_restart_delay:300, max_memory_restart:'512M', kill_timeout:5000,
-    listen_timeout:15000,
-    env:{ NODE_ENV:'production' } },
+    listen_timeout:15000, env:{NODE_ENV:'production'} },
 
-  
+  // rara-web + rara-zrouter entries removed — run-rara-web.sh / run-rara-zrouter.sh
+  // scripts not yet created. Re-add when scripts exist (and rara-agent code is
+  // copied into the image). For now, rara-agent runs as a SEPARATE Docker
+  // container from ghcr.io/yz776/rara-agent:latest.
+  //   { name:'rara-web', script:'/usr/local/bin/run-rara-web.sh', ... }
+  //   { name:'rara-zrouter', script:'/usr/local/bin/run-rara-zrouter.sh', ... }
+
   { name:'ttt', script:'/usr/local/bin/run-ttt.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:mem.ttt, kill_timeout:10000,
