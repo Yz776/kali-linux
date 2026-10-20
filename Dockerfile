@@ -1984,6 +1984,16 @@ RUN mkdir -p /opt && \
 COPY run-rara-web.sh run-rara-zrouter.sh run-nginx.sh run-mysql.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-rara-zrouter.sh /usr/local/bin/run-nginx.sh /usr/local/bin/run-mysql.sh
 
+# nginx + SSL
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl chromium-browser && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /etc/nginx/ssl && openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt -subj /CN=*.ai.id/O=Rara/C=ID
+RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
+COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
+# rara-agent bundle
+RUN mkdir -p /opt && git clone --depth 1 https://github.com/Yz776/rara-agent.git /opt/rara-agent && cd /opt/rara-agent && bun install --frozen-lockfile 2>&1 | tail -3 && DATABASE_URL=file:/tmp/rara-build-validate.db bunx prisma generate 2>&1 | tail -2 && DATABASE_URL=file:/tmp/rara-build-validate.db NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=4096 bun run build 2>&1 | tail -5 && cd mini-services/zrouter && bun install 2>&1 | tail -2 && mkdir -p /data/apps/rara-agent/mini-services/zrouter/data /data/apps/rara-agent/db
+COPY run-rara-web.sh run-rara-zrouter.sh run-nginx.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-rara-zrouter.sh /usr/local/bin/run-nginx.sh
+
 EXPOSE 22 80 443 3000 47291 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

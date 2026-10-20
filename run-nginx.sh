@@ -1,2 +1,2 @@
-#!/usr/bin/bash
-exec sleep infinity
+#!/usr/bin/env bash
+exec nginx -g "daemon off;"
