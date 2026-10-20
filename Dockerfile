@@ -1878,11 +1878,9 @@ const mem = {
   cloud_storage: process.env.CLOUD_STORAGE_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.30))+'M',
   aiodl:    process.env.AIODL_MAX_MEMORY      || Math.min(256, Math.floor(BUDGET*0.10))+'M',
   catur:    process.env.CATUR_MAX_MEMORY     || Math.min(512, Math.floor(BUDGET*0.20))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',  animest:  process.env.ANIMEST_MAX_MEMORY    || Math.min(640, Math.floor(BUDGET*0.25))+'M',const mem = {
-  cloud_storage: process.env.CLOUD_STORAGE_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.30))+'M',
-  aiodl:    process.env.AIODL_MAX_MEMORY      || Math.min(256, Math.floor(BUDGET*0.10))+'M',
-  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(512, Math.floor(BUDGET*0.20))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',         || '96M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
+  animest:  process.env.ANIMEST_MAX_MEMORY    || Math.min(640, Math.floor(BUDGET*0.25))+'M',
+  cf:       process.env.CF_MAX_MEMORY         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
 // Catatan: apps di bawah pakai interpreter:'bash' (run-*.sh), jadi TIDAK boleh
