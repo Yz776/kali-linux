@@ -466,7 +466,7 @@ const BUDGET_PERCENT = Math.min(95, Math.max(50, Number(process.env.APP_MEM_BUDG
 const APP_BUDGET_MB  = Math.floor(TOTAL_MEM_MB * BUDGET_PERCENT / 100);
 
 // Distribusi v9 (6 app auto-start — cloud-storage, aiodl, animest, catur, ttt, cf):
-//   cloud-storage 30%, aiodl 10%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
+//   cloudflared 96M, animest 25%, nginx 256M, mysql 512M, cloud-storage 30%, aiodl 10%, catur 20%, ttt 15%
 //   (total ~100%, sisa ~0% buffer — aiodl biasanya idle kecuali saat download aktif)
 // ANIMEST_MEM tetap didefinisikan untuk dipakai jika user start animest manual via adaptive launcher.
 const CLOUD_STORAGE_MEM = Number(process.env.CLOUD_STORAGE_MEMORY_MB || Math.min(768, Math.floor(APP_BUDGET_MB * 0.30)));
@@ -1872,14 +1872,17 @@ function detectContainerMemMB() {
 
 const memTotal = detectContainerMemMB();
 const BUDGET = Math.floor(memTotal * 0.75);
-// Distribusi v9.1 (6 app auto-start — cloud-storage, aiodl, animest, catur, ttt, cf):
-//   cloud-storage 30%, aiodl 10%, animest 25%, catur 20%, ttt 15%, cf 96M fixed
+// Distribusi v9.2 (8 app auto-start — cloudflared-ssh, animest, nginx, mysql, cloud-storage, aiodl, catur, ttt):
+//   cloudflared 96M, animest 25%, nginx 256M, mysql 512M, cloud-storage 30%, aiodl 10%, catur 20%, ttt 15%
 const mem = {
   cloud_storage: process.env.CLOUD_STORAGE_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.30))+'M',
   aiodl:    process.env.AIODL_MAX_MEMORY      || Math.min(256, Math.floor(BUDGET*0.10))+'M',
   catur:    process.env.CATUR_MAX_MEMORY     || Math.min(512, Math.floor(BUDGET*0.20))+'M',
-  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',
-  cf:       process.env.CF_MAX_MEMORY         || '96M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',  animest:  process.env.ANIMEST_MAX_MEMORY    || Math.min(640, Math.floor(BUDGET*0.25))+'M',const mem = {
+  cloud_storage: process.env.CLOUD_STORAGE_MAX_MEMORY || Math.min(768, Math.floor(BUDGET*0.30))+'M',
+  aiodl:    process.env.AIODL_MAX_MEMORY      || Math.min(256, Math.floor(BUDGET*0.10))+'M',
+  catur:    process.env.CATUR_MAX_MEMORY     || Math.min(512, Math.floor(BUDGET*0.20))+'M',
+  ttt:      process.env.TTT_MAX_MEMORY       || Math.min(384,  Math.floor(BUDGET*0.15))+'M',         || '96M',
 };
 const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16384';
 // Catatan: apps di bawah pakai interpreter:'bash' (run-*.sh), jadi TIDAK boleh
@@ -1890,7 +1893,17 @@ const nodeArgs = '--expose-gc --max-semi-space-size=64 --max-http-header-size=16
 module.exports = { apps: [
   { name:'cloudflared-ssh', script:'/usr/local/bin/run-cloudflared.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:5000,
-    exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },
+    exp_backoff_restart_delay:300, max_memory_restart:mem.cf, kill_timeout:5000 },  { name:'animest', script:'/usr/local/bin/run-animest.sh', interpreter:'bash',
+    autorestart:true, max_restarts:5, min_uptime:'30s', restart_delay:5000,
+    exp_backoff_restart_delay:500, max_memory_restart:mem.animest, kill_timeout:30000,
+    listen_timeout:60000,
+    // Animest: Bun + Vite (port 3051) — auto-install deps + build on first start
+    // (yarn install --ignore-engines + yarn build) if node_modules/dist missing.
+    // min_uptime 30s karena startup lambat (bun install + vite build di boot pertama).
+    // kill_timeout 30s untuk kasih waktu chromium child processes clean up.
+    env:{ NODE_ENV:'production', PORT: process.env.ANIMEST_PORT || '3051', KEEP_APP_PORT_ENV:'true' } },
+
+  
   { name:'nginx', script:'/usr/local/bin/run-nginx.sh', interpreter:'bash',
     autorestart:true, max_restarts:10, min_uptime:'10s', restart_delay:2000,
     exp_backoff_restart_delay:200, max_memory_restart:'256M', kill_timeout:10000,
