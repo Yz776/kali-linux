@@ -1970,10 +1970,11 @@ RUN chmod +x \
 # only needs `bun install` (or `npm install`) + `bun run build`. The bundle
 # output is `.next/standalone/server.js` which is what PM2 runs.
 #
-# CRITICAL: use `set -o pipefail` so that `bun run build 2>&1 | tail -10`
-# preserves the actual exit code (otherwise tail's exit=0 masks the failure
-# and the docker build reports success even though .next/standalone/ is empty).
-RUN set -o pipefail && mkdir -p /opt && \
+# CRITICAL: the `test -f` checks at the end verify that `bun run build` actually
+# produced the standalone server.js + BUILD_ID. Without these, a silent build
+# failure (where `| tail -30` masks the exit code) would result in an image
+# without the runtime artifact, and rara-web would crash on startup.
+RUN mkdir -p /opt && \
     git clone --depth 1 https://github.com/Yz776/rara-agent.git /opt/rara-agent && \
     cd /opt/rara-agent && \
     bun install --frozen-lockfile 2>&1 | tail -5 && \
