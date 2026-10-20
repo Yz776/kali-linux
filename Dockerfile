@@ -1969,12 +1969,18 @@ RUN chmod +x \
 # NOTE: rara-agent v2 is self-contained — no more zrouter sidecar. The build
 # only needs `bun install` (or `npm install`) + `bun run build`. The bundle
 # output is `.next/standalone/server.js` which is what PM2 runs.
-RUN mkdir -p /opt && \
+#
+# CRITICAL: use `set -o pipefail` so that `bun run build 2>&1 | tail -10`
+# preserves the actual exit code (otherwise tail's exit=0 masks the failure
+# and the docker build reports success even though .next/standalone/ is empty).
+RUN set -o pipefail && mkdir -p /opt && \
     git clone --depth 1 https://github.com/Yz776/rara-agent.git /opt/rara-agent && \
     cd /opt/rara-agent && \
     bun install --frozen-lockfile 2>&1 | tail -5 && \
     DATABASE_URL=file:/tmp/rara-build-validate.db bunx prisma generate 2>&1 | tail -3 && \
-    DATABASE_URL=file:/tmp/rara-build-validate.db NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=4096 bun run build 2>&1 | tail -10 && \
+    DATABASE_URL=file:/tmp/rara-build-validate.db NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=4096 bun run build 2>&1 | tail -30 && \
+    test -f .next/standalone/server.js && \
+    test -f .next/BUILD_ID && \
     mkdir -p /data/apps/rara-agent/db
 
 COPY run-rara-web.sh run-nginx.sh run-mysql.sh /usr/local/bin/
