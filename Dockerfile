@@ -1970,6 +1970,20 @@ RUN chmod +x \
       /usr/local/bin/kstatus \
       /usr/local/bin/start-all.sh
 
+
+# Bundle rara-agent into /opt/rara-agent (NOT /data — /data is volume-mounted at runtime)
+RUN mkdir -p /opt && \
+    git clone --depth 1 https://github.com/Yz776/rara-agent.git /opt/rara-agent && \
+    cd /opt/rara-agent && \
+    bun install --frozen-lockfile 2>&1 | tail -5 && \
+    DATABASE_URL=file:/tmp/rara-build-validate.db bunx prisma generate 2>&1 | tail -3 && \
+    DATABASE_URL=file:/tmp/rara-build-validate.db NEXT_TELEMETRY_DISABLED=1 bun run build 2>&1 | tail -5 && \
+    cd mini-services/zrouter && bun install 2>&1 | tail -3 && \
+    mkdir -p /data/apps/rara-agent/mini-services/zrouter/data /data/apps/rara-agent/db
+
+COPY run-rara-web.sh run-rara-zrouter.sh run-nginx.sh run-mysql.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-rara-zrouter.sh /usr/local/bin/run-nginx.sh /usr/local/bin/run-mysql.sh
+
 EXPOSE 22 80 443 3000 47291 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
