@@ -275,7 +275,7 @@ RUN set -eux; \
 #       tidak butuh signing key. Single-platform build (linux/amd64) jadi
 #       cukup download 1 tarball linux-x64.
 RUN set -eux; \
-    NODE_VERSION=20.20.2; \
+    NODE_VERSION=22.23.3; \
     NODE_TARBALL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
     NODE_SHASUMS="https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
     echo "[LAYER 3] downloading Node.js v${NODE_VERSION} from ${NODE_TARBALL}"; \
@@ -1985,8 +1985,6 @@ RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ngin
 RUN mkdir -p /etc/nginx/ssl && openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt -subj /CN=*.ai.id/O=Rara/C=ID
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
-# rara-agent bundle
-RUN mkdir -p /opt && git clone --depth 1 https://github.com/Yz776/rara-agent.git /opt/rara-agent && cd /opt/rara-agent && bun install --frozen-lockfile 2>&1 | tail -3 && DATABASE_URL=file:/tmp/rara-build-validate.db bunx prisma generate 2>&1 | tail -2 && DATABASE_URL=file:/tmp/rara-build-validate.db NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=4096 bun run build 2>&1 | tail -10 && mkdir -p /data/apps/rara-agent/db
 COPY run-rara-web.sh run-nginx.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-nginx.sh
 
