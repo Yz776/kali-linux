@@ -1,0 +1,22 @@
+[Unit]
+Description=Update kali container to latest ghcr.io/yz776/kali-linux:main
+# Run after docker is up so we can pull + recreate.
+After=docker.service
+Requires=docker.service
+# Don't pile up multiple instances if boot is slow.
+ConditionPathIsExecutable=/usr/local/bin/update-kali-image.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-kali-image.sh
+# Timeout: docker pull of kali-linux image (~7 GB compressed) can take
+# up to 5 min on a slow link. Give generous headroom.
+TimeoutStartSec=900
+# Failure mode: don't crash the boot, just log and move on.
+# The existing kali container (with old image) keeps running.
+SuccessExitStatus=0 1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
