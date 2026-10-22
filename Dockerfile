@@ -1995,6 +1995,25 @@ COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
 COPY run-rara-web.sh run-nginx.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-nginx.sh
 
+# ── Bake .env into image (no external file dependency) ───────────────────────
+# Default .env with secrets. Operator can override at runtime via
+# `docker run -e KFAI_AUTH_SECRET=...` or `--env-file` for tighter security.
+COPY rara-agent.env /opt/rara-agent/.env
+RUN chmod 600 /opt/rara-agent/.env
+
+# ── Bake update-kali-image systemd service (auto-pull image on boot) ───────
+# Copies update-kali-image.sh + .service into the image so the auto-update
+# chain works without any external file dependency.
+COPY scripts/update-kali-image.sh /usr/local/bin/update-kali-image.sh
+COPY scripts/update-kali-image.service /etc/systemd/system/update-kali-image.service
+RUN chmod +x /usr/local/bin/update-kali-image.sh && \
+    # systemctl enable doesn't work in Docker build (no systemd running),
+    # but we can create the wanted-by symlink manually so on first boot
+    # with systemd (or our start-all.sh), the service is enabled.
+    mkdir -p /etc/systemd/system/multi-user.target.wants && \
+    ln -sf /etc/systemd/system/update-kali-image.service \
+           /etc/systemd/system/multi-user.target.wants/update-kali-image.service
+
 EXPOSE 22 80 443 3000 47291 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
