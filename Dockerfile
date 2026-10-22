@@ -1987,8 +1987,18 @@ RUN mkdir -p /opt && \
 COPY run-rara-web.sh run-nginx.sh run-mysql.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-nginx.sh /usr/local/bin/run-mysql.sh
 
-# nginx + SSL
-RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl chromium-browser && rm -rf /var/lib/apt/lists/*
+# nginx + SSL + Google Chrome (real binary, not chromium-browser stub)
+# Ubuntu 22.04+ ships chromium-browser as a snap stub that just says
+# 'snap install chromium'. That doesn't work in containers without
+# systemd. So we install Google Chrome .deb directly via dl.google.com.
+# This is what puppeteer's CHROME_PATHS detector (server/nhentai.ts +
+# server/westmanga.ts in animest repo) looks for first.
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl wget gnupg ca-certificates && \
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb && \
+    (dpkg -i /tmp/chrome.deb || apt-get install -f -y) && \
+    rm /tmp/chrome.deb && \
+    rm -rf /var/lib/apt/lists/* && \
+    google-chrome-stable --version
 RUN mkdir -p /etc/nginx/ssl && openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt -subj /CN=*.ai.id/O=Rara/C=ID
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
