@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>209.50.50.121 · kangwifi network</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230a0e1a' stroke='%237c3aed' stroke-width='2'/><text x='50' y='65' text-anchor='middle' font-size='44' fill='%237c3aed'>k</text></svg>">
+<style>
+  *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg-0: #050608;
+    --bg-1: #0a0e1a;
+    --bg-2: #111729;
+    --text-0: #e6edf3;
+    --text-1: #a3aab8;
+    --text-2: #5b6472;
+    --accent: #7c3aed;
+    --accent-2: #ec4899;
+    --accent-3: #06b6d4;
+    --ok: #10b981;
+    --warn: #f59e0b;
+    --line: rgba(255,255,255,0.06);
+    --line-strong: rgba(255,255,255,0.12);
+  }
+  html, body { height: 100%; width: 100%; }
+  body {
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    background: var(--bg-0);
+    color: var(--text-0);
+    overflow-x: hidden;
+    min-height: 100vh;
+    position: relative;
+  }
+  /* Animated gradient mesh */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -50%;
+    z-index: 0;
+    background:
+      radial-gradient(ellipse 800px 600px at 15% 20%, rgba(124,58,237,0.20), transparent 50%),
+      radial-gradient(ellipse 600px 800px at 85% 80%, rgba(236,72,153,0.15), transparent 50%),
+      radial-gradient(ellipse 1000px 700px at 50% 50%, rgba(6,182,212,0.10), transparent 50%);
+    animation: meshMove 24s ease-in-out infinite alternate;
+    filter: blur(20px);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 100% 80% at 50% 30%, black 0%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse 100% 80% at 50% 30%, black 0%, transparent 80%);
+  }
+  @keyframes meshMove {
+    0%   { transform: translate(0, 0) rotate(0deg); }
+    50%  { transform: translate(2%, -2%) rotate(2deg); }
+    100% { transform: translate(-2%, 2%) rotate(-2deg); }
+  }
+  .stage {
+    position: relative;
+    z-index: 1;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  /* ── Header ──────────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 48px;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand-mark {
+    width: 44px; height: 44px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center;
+    font-size: 22px; font-weight: 700;
+    color: white;
+    box-shadow: 0 8px 24px rgba(124,58,237,0.35);
+    position: relative;
+  }
+  .brand-mark::after {
+    content: "";
+    position: absolute; inset: 0;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    filter: blur(12px);
+    z-index: -1;
+    opacity: 0.5;
+  }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
+  .brand-name { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+  .brand-tag { font-size: 12px; color: var(--text-2); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: rgba(16,185,129,0.10);
+    border: 1px solid rgba(16,185,129,0.30);
+    border-radius: 999px;
+    font-size: 12px;
+    color: var(--ok);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .badge-dot {
+    width: 6px; height: 6px;
+    background: var(--ok); border-radius: 50%;
+    box-shadow: 0 0 8px var(--ok);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.5; transform: scale(0.85); }
+  }
+  /* ── Hero ─────────────────────────────────────────────────────────────── */
+  .hero {
+    text-align: center;
+    padding: 40px 0 56px;
+  }
+  .hero-eyebrow {
+    display: inline-block;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--text-2);
+    margin-bottom: 24px;
+    padding: 6px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.02);
+  }
+  .hero h1 {
+    font-size: clamp(36px, 7vw, 68px);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+    margin-bottom: 24px;
+    background: linear-gradient(135deg, #fff 0%, #c4b5fd 50%, #f9a8d4 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p {
+    font-size: clamp(15px, 2vw, 17px);
+    color: var(--text-1);
+    max-width: 640px;
+    margin: 0 auto 8px;
+    line-height: 1.65;
+  }
+  .hero .domain {
+    margin-top: 24px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: var(--accent-3);
+    word-break: break-all;
+  }
+  /* ── Service Grid ───────────────────────────────────────────────────── */
+  .section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--text-2);
+    margin: 48px 0 20px;
+    font-weight: 600;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px;
+    transition: transform .25s ease, border-color .25s ease, box-shadow .25s ease;
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(400px circle at var(--mx,50%) var(--my,0%), rgba(124,58,237,0.10), transparent 40%);
+    opacity: 0;
+    transition: opacity .25s ease;
+    pointer-events: none;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    border-color: var(--line-strong);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.40), 0 0 0 1px rgba(124,58,237,0.20);
+  }
+  .card:hover::before { opacity: 1; }
+  .card-head {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .card-icon {
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    background: rgba(124,58,237,0.15);
+    border: 1px solid rgba(124,58,237,0.25);
+    display: grid; place-items: center;
+    font-size: 18px;
+  }
+  .card-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-0);
+  }
+  .card-tag {
+    font-size: 11px;
+    color: var(--text-2);
+    font-family: ui-monospace, monospace;
+  }
+  .card-url {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--accent-3);
+    margin-top: 4px;
+    word-break: break-all;
+  }
+  .card-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px;
+    color: var(--ok);
+    margin-top: auto;
+    padding-top: 6px;
+    font-family: ui-monospace, monospace;
+  }
+  .card-status .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 6px var(--ok);
+  }
+  .card-status.offline { color: var(--warn); }
+  .card-status.offline .dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  /* ── Info Panel ───────────────────────────────────────────────────── */
+  .info {
+    margin-top: 56px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .info-card {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .info-card h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--text-2);
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  .info-card p {
+    font-size: 13px;
+    color: var(--text-1);
+    line-height: 1.65;
+  }
+  .info-card code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(255,255,255,0.06);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--accent-3);
+  }
+  .info-card a { color: var(--accent-3); text-decoration: none; }
+  .info-card a:hover { text-decoration: underline; }
+  /* ── Footer ───────────────────────────────────────────────────────── */
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-2);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  footer .left { color: var(--text-1); }
+  footer a { color: var(--text-2); text-decoration: none; }
+  footer a:hover { color: var(--accent-3); }
+  /* ── Mobile ───────────────────────────────────────────────────────── */
+  @media (max-width: 640px) {
+    .stage { padding: 20px 16px 64px; }
+    header { margin-bottom: 32px; }
+    .hero { padding: 20px 0 40px; }
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <header>
+      <div class="brand">
+        <div class="brand-mark">k</div>
+        <div class="brand-text">
+          <span class="brand-name">kangwifi network</span>
+          <span class="brand-tag">// 209.50.50.121 · chi-us-1</span>
+        </div>
+      </div>
+      <span class="badge"><span class="badge-dot"></span>server online · uptime <span id="uptime">—</span></span>
+    </header>
+
+    <section class="hero">
+      <span class="hero-eyebrow">unconfigured domain · default landing</span>
+      <h1>Domain ini belum<br>dipasang servis-nya.</h1>
+      <p>
+        Host <strong id="host">—</strong> nge-point ke <code style="font-family:inherit;color:var(--accent-3)">209.50.50.121</code>
+        tapi belum ada konfigurasi nginx yang cocok.
+        Mau di-host service lain? Lihat info di bawah buat deploy.
+      </p>
+      <p class="domain" id="host-detail">
+        Hostname: <span id="host-name">—</span> · IP: <span id="host-ip">—</span>
+      </p>
+    </section>
+
+    <h2 class="section-title">service aktif di server ini</h2>
+    <div class="grid" id="services">
+      <!-- Filled by JS below so the page is dynamic, OR by static content if JS disabled. -->
+      <a class="card" href="https://rara.ai.id/">
+        <div class="card-head">
+          <div class="card-icon">🌸</div>
+          <div>
+            <div class="card-name">Rara</div>
+            <div class="card-tag">asisten AI ceria</div>
+          </div>
+        </div>
+        <div class="card-url">rara.ai.id</div>
+        <div class="card-status"><span class="dot"></span>online · :3002</div>
+      </a>
+      <a class="card" href="https://dl.kangwifi.eu.org/">
+        <div class="card-head">
+          <div class="card-icon">📥</div>
+          <div>
+            <div class="card-name">aiodl</div>
+            <div class="card-tag">AIO video downloader</div>
+          </div>
+        </div>
+        <div class="card-url">dl.kangwifi.eu.org</div>
+        <div class="card-status"><span class="dot"></span>online · :8090</div>
+      </a>
+      <a class="card" href="https://bot.kangwifi.eu.org/">
+        <div class="card-head">
+          <div class="card-icon">💬</div>
+          <div>
+            <div class="card-name">bot-wa</div>
+            <div class="card-tag">WhatsApp gateway</div>
+          </div>
+        </div>
+        <div class="card-url">bot.kangwifi.eu.org</div>
+        <div class="card-status"><span class="dot"></span>online · :3000</div>
+      </a>
+      <a class="card" href="https://game.kangwifi.eu.org/">
+        <div class="card-head">
+          <div class="card-icon">♟️</div>
+          <div>
+            <div class="card-name">catur</div>
+            <div class="card-tag">game arena</div>
+          </div>
+        </div>
+        <div class="card-url">game.kangwifi.eu.org</div>
+        <div class="card-status"><span class="dot"></span>online · :3003</div>
+      </a>
+      <a class="card" href="https://storage.kangwifi.eu.org/">
+        <div class="card-head">
+          <div class="card-icon">📁</div>
+          <div>
+            <div class="card-name">cloud-storage</div>
+            <div class="card-tag">file server</div>
+          </div>
+        </div>
+        <div class="card-url">storage.kangwifi.eu.org</div>
+        <div class="card-status offline"><span class="dot"></span>idle · :47291</div>
+      </a>
+      <a class="card" href="https://wotanime.my.id/">
+        <div class="card-head">
+          <div class="card-icon">📺</div>
+          <div>
+            <div class="card-name">wotanime</div>
+            <div class="card-tag">anime sub indonesia</div>
+          </div>
+        </div>
+        <div class="card-url">wotanime.my.id</div>
+        <div class="card-status"><span class="dot"></span>online · :3051</div>
+      </a>
+    </div>
+
+    <div class="info">
+      <div class="info-card">
+        <h3>📍 kenapa halaman ini muncul?</h3>
+        <p>
+          Domain yang lo akses nge-resolve DNS ke <code>209.50.50.121</code> tapi
+          belum ada <code>server_name</code> yang cocok di nginx. Default
+          fallbacknya adalah landing page ini.
+        </p>
+      </div>
+      <div class="info-card">
+        <h3>🚀 mau di-host service lo sendiri?</h3>
+        <p>
+          Tambahin <code>server_name yourdomain;</code> block di
+          <code>/etc/nginx/conf.d/rara-nginx.conf</code> di dalam container
+          <code>kali</code>, terus <code>docker exec kali nginx -s reload</code>.
+          Arahkan <code>proxy_pass</code> ke port app lo.
+        </p>
+      </div>
+      <div class="info-card">
+        <h3>🔒 masalah security?</h3>
+        <p>
+          Domain non-registered akan kena <strong>landing page ini</strong> aja.
+          Rara + admin panel cuma kebuka via <code>rara.ai.id</code>
+          (ada host-whitelist middleware di Next.js buat defense-in-depth).
+        </p>
+      </div>
+      <div class="info-card">
+        <h3>📡 kontak</h3>
+        <p>
+          Owner: <code>@yz776</code> · Repo:
+          <a href="https://github.com/Yz776">github.com/Yz776</a>
+          · Server: <code>kali-linux</code> container (ghcr.io/yz776/kali-linux:main)
+        </p>
+      </div>
+    </div>
+
+    <footer>
+      <span class="left">kangwifi.net · running on ghcr.io/yz776/kali-linux:main</span>
+      <span>209.50.50.121 · chicago · self-hosted · 🌸</span>
+    </footer>
+  </div>
+
+  <script>
+    // Show the visitor's hostname (so they can see what domain they're hitting from)
+    (function() {
+      const host = location.hostname || '(unknown)';
+      document.getElementById('host').textContent = host;
+      document.getElementById('host-name').textContent = host;
+      // Fetch the IP client-side via DNS-over-HTTPS isn't reliable for arbitrary hostnames,
+      // so just show the server's known IP.
+      document.getElementById('host-ip').textContent = '209.50.50.121';
+
+      // Hover effect: track mouse for card spotlight
+      document.querySelectorAll('.card').forEach(card => {
+        card.addEventListener('mousemove', e => {
+          const r = card.getBoundingClientRect();
+          card.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+          card.style.setProperty('--my', (e.clientY - r.top) + 'px');
+        });
+      });
+
+      // Simple uptime counter (since page load)
+      const start = Date.now();
+      function tick() {
+        const s = Math.floor((Date.now() - start) / 1000);
+        const m = Math.floor(s / 60);
+        const sec = s % 60;
+        document.getElementById('uptime').textContent = m + 'm ' + sec + 's';
+      }
+      tick();
+      setInterval(tick, 1000);
+    })();
+  </script>
+</body>
+</html>

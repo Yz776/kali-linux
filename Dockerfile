@@ -2005,6 +2005,14 @@ COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
 COPY run-rara-web.sh run-nginx.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-nginx.sh
 
+# ── Default landing page (served by nginx default_server for unconfigured domains) ──
+# Any Host that doesn't match a specific server_name falls through to this
+# static page at /var/www/default/index.html. Self-contained HTML+CSS+JS,
+# no external deps. Shows the list of active services + how to deploy.
+RUN mkdir -p /var/www/default
+COPY default-landing.html /var/www/default/index.html
+RUN chmod 644 /var/www/default/index.html
+
 # ── Bake .env into image (no external file dependency) ───────────────────────
 # Default .env with secrets. Operator can override at runtime via
 # `docker run -e KFAI_AUTH_SECRET=...` or `--env-file` for tighter security.
