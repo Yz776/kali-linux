@@ -1573,6 +1573,11 @@ OUT_DIR="${AIODL_OUT:-/data/apps/aiodl/dl}"
 PORT="${AIODL_PORT:-8090}"
 HOST="${AIODL_HOST:-0.0.0.0}"
 GAP="${AIODL_GAP:-4}"
+# Admin login key for the /admin panel (TikTok account config + user-behavior
+# simulation). If empty, /admin is disabled and tool works anonymously.
+# Override at docker run time via -e AIODL_ADMIN_KEY=... for tighter security.
+export AIODL_ADMIN_KEY="${AIODL_ADMIN_KEY:-aiodl_kangwifi_2026_admin_secret_xyz}"
+export AIODL_CONFIG_PATH="${AIODL_CONFIG_PATH:-/data/apps/aiodl/js/config.json}"
 
 [ ! -d "$APP_DIR" ] && echo "[$APP_NAME] folder tidak ada: $APP_DIR" >&2 && sleep 10 && exit 1
 cd "$APP_DIR"
