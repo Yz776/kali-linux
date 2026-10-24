@@ -2007,6 +2007,7 @@ RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ngin
 RUN mkdir -p /etc/nginx/ssl && openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt -subj /CN=*.ai.id/O=Rara/C=ID
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY rara-nginx.conf /etc/nginx/conf.d/rara-nginx.conf
+COPY am-web-nginx.conf /etc/nginx/conf.d/am-web-nginx.conf
 COPY run-rara-web.sh run-nginx.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/run-rara-web.sh /usr/local/bin/run-nginx.sh
 
